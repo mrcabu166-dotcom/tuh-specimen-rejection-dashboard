@@ -1,0 +1,1075 @@
+"""
+cleaner.py
+Data Ingestion, Header Auto-Detection, Ward Standardization,
+Cause Normalization, and Aggregations for TUH Specimen Rejection Reports.
+"""
+
+import os
+import re
+import io
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+# ==============================================================================
+# 1. DICTIONARIES & MAPPINGS
+# ==============================================================================
+
+# Thai Month mapping
+THAI_MONTHS = {
+    'ม.ค.': 1, 'ม.ค': 1, 'มกราคม': 1,
+    'ก.พ.': 2, 'ก.พ': 2, 'กุมภาพันธ์': 2,
+    'มี.ค.': 3, 'มี.ค': 3, 'มีนาคม': 3,
+    'เม.ย.': 4, 'เม.ย': 4, 'เมษายน': 4,
+    'พ.ค.': 5, 'พ.ค': 5, 'พฤษภาคม': 5,
+    'มิ.ย.': 6, 'มิ.ย': 6, 'มิถุนายน': 6,
+    'ก.ค.': 7, 'ก.ค': 7, 'กรกฎาคม': 7,
+    'ส.ค.': 8, 'ส.ค': 8, 'สิงหาคม': 8,
+    'ก.ย.': 9, 'ก.ย': 9, 'กันยายน': 9,
+    'ต.ค.': 10, 'ต.ค': 10, 'ตุลาคม': 10,
+    'พ.ย.': 11, 'พ.ย': 11, 'พฤศจิกายน': 11,
+    'ธ.ค.': 12, 'ธ.ค': 12, 'ธันวาคม': 12,
+}
+
+THAI_MONTH_NAMES_SHORT = [
+    '', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+]
+
+# Standard Hospital Ward Mapping
+# Maps raw ward names, abbreviations, typos, and variations to official hospital ward names
+WARD_MAPPING = {
+    # --- อายุรกรรม (Internal Medicine) ---
+    'อช.ส': 'อายุรกรรมชายสามัญ',
+    'อช-สามัญ': 'อายุรกรรมชายสามัญ',
+    'อช.สามัญ': 'อายุรกรรมชายสามัญ',
+    'ACH.S': 'อายุรกรรมชายสามัญ',
+    'อายุรกรรมชายสามัญ': 'อายุรกรรมชายสามัญ',
+    
+    'อช.พ': 'อายุรกรรมชายพิเศษ',
+    'อช-พิเศษ': 'อายุรกรรมชายพิเศษ',
+    'อช.พิเศษ': 'อายุรกรรมชายพิเศษ',
+    'อายุรกรรมชายพิเศษ': 'อายุรกรรมชายพิเศษ',
+    'อายุุรกรรมชายพิเศษ': 'อายุรกรรมชายพิเศษ',
+    
+    'อญ.ส': 'อายุรกรรมหญิงสามัญ',
+    'อญ-สามัญ': 'อายุรกรรมหญิงสามัญ',
+    'อญ.สามัญ': 'อายุรกรรมหญิงสามัญ',
+    'อายุรกรรมหญิงสามัญ': 'อายุรกรรมหญิงสามัญ',
+    'อายุกรรมหญิงสามัญ': 'อายุรกรรมหญิงสามัญ',
+    'อายุรกรรมหญิงสามััญ': 'อายุรกรรมหญิงสามัญ',
+    'อายุรกรรมหญิิงสามัญ': 'อายุรกรรมหญิงสามัญ',
+    'อายุรกรรมหญฺิงสามัญ': 'อายุรกรรมหญิงสามัญ',
+    'อายุหญิงสามัญ': 'อายุรกรรมหญิงสามัญ',
+    
+    'อญ-พิเศษ': 'อายุรกรรมหญิงพิเศษ',
+    'อายุรกรรมหญิงพิเศษ': 'อายุรกรรมหญิงพิเศษ',
+    
+    'Med Kitti': 'อายุรกรรมกิตติวัฒนา',
+    'Med.Kitti': 'อายุรกรรมกิตติวัฒนา',
+    'MED.KITTI': 'อายุรกรรมกิตติวัฒนา',
+    'med.kiti': 'อายุรกรรมกิตติวัฒนา',
+    'Med.kitti': 'อายุรกรรมกิตติวัฒนา',
+    'M.kiti': 'อายุรกรรมกิตติวัฒนา',
+    'อายุรกรรมกิตติวัฒนา': 'อายุรกรรมกิตติวัฒนา',
+    'อายุรกรรมกิตติ': 'อายุรกรรมกิตติวัฒนา',
+    'อายุุรกรรมกิตติ': 'อายุรกรรมกิตติวัฒนา',
+    
+    'อายุรกรรมความดันลบ': 'อายุรกรรมความดันลบ',
+    'อายุุรกรรมความดันลบ': 'อายุรกรรมความดันลบ',
+    'อายุรกรรมลบ': 'อายุรกรรมความดันลบ',
+    
+    'อายุรกรรม': 'อายุรกรรมทั่วไป',
+    
+    # --- ศัลยกรรม (Surgery) ---
+    'ศัลยกรรม 1': 'ศัลยกรรม 1',
+    'ศัลยกรรม1': 'ศัลยกรรม 1',
+    'Sur1': 'ศัลยกรรม 1',
+    
+    'ศัลยกรรม 2': 'ศัลยกรรม 2',
+    'ศัลยกรรม2': 'ศัลยกรรม 2',
+    'sur2': 'ศัลยกรรม 2',
+    'ser.2': 'ศัลยกรรม 2',
+    
+    'ศัลยกรรม 3': 'ศัลยกรรม 3',
+    'ศัลยกรรม3': 'ศัลยกรรม 3',
+    
+    'ศัลยกรรมพิเศษ 1': 'ศัลยกรรมพิเศษ 1',
+    'ศัลยกรรมพิเศษ1': 'ศัลยกรรมพิเศษ 1',
+    'ศััลยกรรมพิเศษ 1': 'ศัลยกรรมพิเศษ 1',
+    
+    'ศัลยกรรมพิเศษ 2': 'ศัลยกรรมพิเศษ 2',
+    'ศัลยกรรมพิเศษ2': 'ศัลยกรรมพิเศษ 2',
+    'ศัลพิเศษ2': 'ศัลยกรรมพิเศษ 2',
+    'ศัล-พิเศษ 2': 'ศัลยกรรมพิเศษ 2',
+    
+    'ศัลยกรรม-พิเศษ': 'ศัลยกรรมพิเศษ',
+    'ศัลยกรรมพิเศษ': 'ศัลยกรรมพิเศษ',
+    
+    # --- ศัลยกรรมกระดูกและข้อ (Orthopedics) ---
+    'ศัลยกรรมกระดูกและข้อสามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ศัลกรรมกระดูกและข้อสามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ortho.สามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ศัลยกรรมกระดูก-สามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ศัลยกรรมกระดูกสามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ศัลกระดูกสามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ศูัลยกรรมกระดูกและข้อสามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ศัลกระดูกและข้อสามัญ': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    'ศัลยกรรมกระดูก': 'ศัลยกรรมกระดูกและข้อสามัญ',
+    
+    'ศัลยกรรมกระดูกและข้อพิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    'ศัลกระดูกพิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    'ศัลกระดูก-พิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    'ศัลกระดูกข้อพิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    'ศัลยกรรมกระดูก-พิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    'ศัลยกรรมกระดูกพิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    'ศัล-กระดูกพิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    'ศัลย์กระดูกและข้อพิเศษ': 'ศัลยกรรมกระดูกและข้อพิเศษ',
+    
+    # --- กุมารเวชกรรม (Pediatrics) ---
+    'Ped1': 'กุมารเวชกรรม 1',
+    'กุมารเวชกรรม1': 'กุมารเวชกรรม 1',
+    'กุุมารเวชกรรม 1': 'กุมารเวชกรรม 1',
+    'กุุมารเวชกรรม1': 'กุมารเวชกรรม 1',
+    
+    'กุมารเวชกรรม2': 'กุมารเวชกรรม 2',
+    'กุมาร 2': 'กุมารเวชกรรม 2',
+    'กุมารเวชกรรม 2': 'กุมารเวชกรรม 2',
+    
+    'กุมารพิเศษ': 'กุมารเวชกรรมพิเศษ',
+    'กุุมารเวชกรรมพิเศษ': 'กุมารเวชกรรมพิเศษ',
+    
+    # --- สูติ-นรีเวชกรรม (OB-GYN) ---
+    'สูติ-นรีเวชกรรมสามัญ': 'สูติ-นรีเวชกรรมสามัญ',
+    'สูติสามัญ': 'สูติ-นรีเวชกรรมสามัญ',
+    'สูติ-สามัญ': 'สูติ-นรีเวชกรรมสามัญ',
+    'สูติ-นรีสามัญ': 'สูติ-นรีเวชกรรมสามัญ',
+    
+    'สูติ-นรีเวชกรรมพิเศษ': 'สูติ-นรีเวชกรรมพิเศษ',
+    
+    'ห้องคลอด': 'ห้องคลอด (LR)',
+    'งานพยาบาลผู้คลอด': 'ห้องคลอด (LR)',
+    'LR': 'ห้องคลอด (LR)',
+    
+    # --- หอผู้ป่วยวิกฤต (ICU / Critical Care) ---
+    'MICU': 'หอผู้ป่วยวิกฤตอายุรกรรม (MICU)',
+    'icum': 'หอผู้ป่วยวิกฤตอายุรกรรม (MICU)',
+    'วิกฤตอายุรกรรม': 'หอผู้ป่วยวิกฤตอายุรกรรม (MICU)',
+    'วิกฤตอายุรกรรม(ดุลชั้น4)': 'หอผู้ป่วยวิกฤตอายุรกรรม (MICU)',
+    
+    'sicu': 'หอผู้ป่วยวิกฤตศัลยกรรม (SICU)',
+    'SICU': 'หอผู้ป่วยวิกฤตศัลยกรรม (SICU)',
+    'วิกฤตศัลยกรรม': 'หอผู้ป่วยวิกฤตศัลยกรรม (SICU)',
+    'วิฤตศัลยกรรม': 'หอผู้ป่วยวิกฤตศัลยกรรม (SICU)',
+    'วิกฤตศัลยกรรมหัวใจและทรวงอก': 'หอผู้ป่วยวิกฤตศัลยกรรมหัวใจและทรวงอก (CVT ICU)',
+    
+    'RICU': 'หอผู้ป่วยวิกฤตระบบการหายใจ (RICU)',
+    'วิกฤตระบบหายใจ': 'หอผู้ป่วยวิกฤตระบบการหายใจ (RICU)',
+    'วิกฤตระบบการหายใจ': 'หอผู้ป่วยวิกฤตระบบการหายใจ (RICU)',
+    
+    'CCU': 'หอผู้ป่วยวิกฤตโรคหัวใจ (CCU)',
+    'ccu': 'หอผู้ป่วยวิกฤตโรคหัวใจ (CCU)',
+    'วิกฤตโรคหัวใจ': 'หอผู้ป่วยวิกฤตโรคหัวใจ (CCU)',
+    'วิกฤโรคหัวใจ': 'หอผู้ป่วยวิกฤตโรคหัวใจ (CCU)',
+    
+    'NICU': 'หอผู้ป่วยทารกแรกเกิดวิกฤต (NICU)',
+    'กึ่งวิกฤตทารกแรกเกิด': 'หอผู้ป่วยทารกแรกเกิดวิกฤต (NICU)',
+    
+    'PICU': 'หอผู้ป่วยวิกฤตกุมารเวชกรรม (PICU)',
+    'วิกฤตกุมาร': 'หอผู้ป่วยวิกฤตกุมารเวชกรรม (PICU)',
+    'วิกฤตกุมารเวชกรรม': 'หอผู้ป่วยวิกฤตกุมารเวชกรรม (PICU)',
+    
+    'วิกฤตวิสัญญี': 'หอผู้ป่วยวิกฤตวิสัญญี',
+    'วิกฤตวิสัญญี่': 'หอผู้ป่วยวิกฤตวิสัญญี',
+    'วิฤตวิสัญญี': 'หอผู้ป่วยวิกฤตวิสัญญี',
+    
+    'วิกฤตไฟไหม้': 'หอผู้ป่วยวิกฤตแผลไหม้ (Burn ICU)',
+    'วิกฤตไฟไหม้น้ำร้อนลวก': 'หอผู้ป่วยวิกฤตแผลไหม้ (Burn ICU)',
+    'วิกฤตไฟไหม้น้ำร้อนล้วก': 'หอผู้ป่วยวิกฤตแผลไหม้ (Burn ICU)',
+    'icu-ไฟไหม้': 'หอผู้ป่วยวิกฤตแผลไหม้ (Burn ICU)',
+    'ICU.Burn': 'หอผู้ป่วยวิกฤตแผลไหม้ (Burn ICU)',
+    
+    # --- ระบบประสาท (Neuro / Stroke) ---
+    'วิกฤตศัลยกรรมประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'วิิฤตศัลประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'ศ.ประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'ศัลประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'ศัลยกรรมประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'ศัลกรรมระบบประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'ศัลยกรรมระบบประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'S.Neuro': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    'งานการพยาบาลผู้ป่วยวิกฤตศัลยกรรมระบบประสาท': 'หอผู้ป่วยศัลยกรรมระบบประสาท',
+    
+    'โรคหลอดเลือดสมอง': 'หอผู้ป่วยโรคหลอดเลือดสมอง (Stroke Unit)',
+    'โรคหลอดเลือดสมองและระบบประสาท': 'หอผู้ป่วยโรคหลอดเลือดสมอง (Stroke Unit)',
+    'โรคหลอกเลือดสมอง': 'หอผู้ป่วยโรคหลอดเลือดสมอง (Stroke Unit)',
+    'โรตหลอดเลือดสมองและระบบประสาท': 'หอผู้ป่วยโรคหลอดเลือดสมอง (Stroke Unit)',
+    'หลอดเลือดสมอง': 'หอผู้ป่วยโรคหลอดเลือดสมอง (Stroke Unit)',
+    
+    # --- ห้องพิเศษยูงทอง (Yuangthong Private Wards) ---
+    'พิเศษยูงทอง1': 'ห้องพิเศษยูงทอง 1',
+    'YT1': 'ห้องพิเศษยูงทอง 1',
+    'ยูงทอง 1': 'ห้องพิเศษยูงทอง 1',
+    
+    'พิเศษยูงทอง2': 'ห้องพิเศษยูงทอง 2',
+    'พิเศษยุงทอง2': 'ห้องพิเศษยูงทอง 2',
+    'ยูงทอง 2': 'ห้องพิเศษยูงทอง 2',
+    'ยูงทอง2': 'ห้องพิเศษยูงทอง 2',
+    
+    'พิเศษยูงทอง3': 'ห้องพิเศษยูงทอง 3',
+    'ยูงทอง 3': 'ห้องพิเศษยูงทอง 3',
+    'ยูงทอง3': 'ห้องพิเศษยูงทอง 3',
+    
+    'พิเศษยูงทอง4': 'ห้องพิเศษยูงทอง 4',
+    'พิเศษยููงทอง4': 'ห้องพิเศษยูงทอง 4',
+    'ยููงทอง 4': 'ห้องพิเศษยูงทอง 4',
+    'ยูงทอง4': 'ห้องพิเศษยูงทอง 4',
+    
+    'พิเศษยูงทอง5': 'ห้องพิเศษยูงทอง 5',
+    'YT5.': 'ห้องพิเศษยูงทอง 5',
+    'ยูงทอง5': 'ห้องพิเศษยูงทอง 5',
+    
+    'พิเศษยูงทอง6': 'ห้องพิเศษยูงทอง 6',
+    'ยูงทอง 6': 'ห้องพิเศษยูงทอง 6',
+    'ยูงทอง6': 'ห้องพิเศษยูงทอง 6',
+    
+    'พิเศษยูงทอง': 'ห้องพิเศษยูงทอง',
+    
+    # --- ห้องพิเศษอาคารดุลโสภาคย์ ---
+    'ผู้ป่วยดุล4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'ผู้้ป่วยพิเศษดุล4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'ผู้ป่วยพิเศษดุล4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'พิเศษดุลฯ4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'ดุลฯ4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'พิเศษดุล4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'พิเศษดุุล 4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'DUL 4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'dul 4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    'Dul.4': 'พิเศษอาคารดุลโสภาคย์ ชั้น 4',
+    
+    'ผู่้ป่วยพิเศษดุล5': 'พิเศษอาคารดุลโสภาคย์ ชั้น 5',
+    'พิเศษดุลย์ฯชั้น5': 'พิเศษอาคารดุลโสภาคย์ ชั้น 5',
+    
+    'พิเศษเฉพาะทาง': 'หอผู้ป่วยพิเศษเฉพาะทาง',
+    'VIP': 'หอผู้ป่วย VIP',
+    'vip': 'หอผู้ป่วย VIP',
+    'VIP ศัลยกรรม2': 'หอผู้ป่วย VIP',
+    'VIP ศัล-กระดูก': 'หอผู้ป่วย VIP',
+    'หอผู้ป่วยปัญจา': 'หอผู้ป่วยปัญจา',
+    'ปํญจา': 'หอผู้ป่วยปัญจา',
+    'AY': 'หอผู้ป่วย AY',
+    
+    # --- ผู้ป่วยนอก (OPD) ---
+    'OPD Med1': 'OPD อายุรกรรม 1',
+    'OPD.Med1': 'OPD อายุรกรรม 1',
+    'opd.med1': 'OPD อายุรกรรม 1',
+    'opd M1': 'OPD อายุรกรรม 1',
+    'Med1': 'OPD อายุรกรรม 1',
+    'อายุรกรรม1(OPD)': 'OPD อายุรกรรม 1',
+    'อายุรกรรม1 OPD': 'OPD อายุรกรรม 1',
+    'OPD อายุรกรรม 1': 'OPD อายุรกรรม 1',
+    'อายุระกรรม1(OPD)': 'OPD อายุรกรรม 1',
+    'อายุรกรรม1': 'OPD อายุรกรรม 1',
+    
+    'OPD Med2': 'OPD อายุรกรรม 2',
+    'OPD-MED2': 'OPD อายุรกรรม 2',
+    'opd.med2': 'OPD อายุรกรรม 2',
+    'MED-2': 'OPD อายุรกรรม 2',
+    'OPD M2': 'OPD อายุรกรรม 2',
+    'OPD M-2': 'OPD อายุรกรรม 2',
+    'opd อายุรกรรม2': 'OPD อายุรกรรม 2',
+    'อายุรกรรม2(OPD)': 'OPD อายุรกรรม 2',
+    'อายุรกรรม2 OPD': 'OPD อายุรกรรม 2',
+    'อายุุรกรรม2(OPD)': 'OPD อายุรกรรม 2',
+    'อายุรกรรม2 opd': 'OPD อายุรกรรม 2',
+    'อายุรกรรม2opd': 'OPD อายุรกรรม 2',
+    
+    'OPD GP': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    'opd GP': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    'OPD-GP': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    'GP': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    'เวชศาสตร์ทั่วไป': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    'เวชศาสตร์ทั่วไปและครอบครัว': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    'เวชศาสตร์ทั่วไปและครอบตรัว(OPD)': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    'เวชศาสตร์ทั่วไปและครอบครัว OPD': 'OPD เวชศาสตร์ทั่วไป (GP)',
+    
+    'OPD.Ped': 'OPD กุมารเวชกรรม',
+    
+    'OPD SUR': 'OPD ศัลยกรรม',
+    'ศัลยกรรม OPD': 'OPD ศัลยกรรม',
+    'ศัลยกรรม1(OPD)': 'OPD ศัลยกรรม',
+    'ศัลยกรรมกระดูกและข้อ(OPD)': 'OPD ศัลยกรรมกระดูกและข้อ',
+    
+    'นรีเวชกรรม OPD': 'OPD สูติ-นรีเวชกรรม',
+    
+    'หู คอ จมูก': 'หู คอ จมูก (ENT)',
+    'หู คอ จมูก (OPD)': 'หู คอ จมูก (ENT)',
+    'หู คอ จมูก OPD': 'หู คอ จมูก (ENT)',
+    'หู คอ จมูก ทันตกรรม และศัลยกรรมช่องปาก': 'หู คอ จมูก (ENT)',
+    'ENT': 'หู คอ จมูก (ENT)',
+    'ENT ': 'หู คอ จมูก (ENT)',
+    
+    'OPD ปลอดเชื้อ': 'OPD หน่วยตรวจปลอดเชื้อ',
+    'ปลอดเชื้อ': 'OPD หน่วยตรวจปลอดเชื้อ',
+    'หน่วยตรวจโรคปลอดเชื้อ': 'OPD หน่วยตรวจปลอดเชื้อ',
+    
+    'โรคติดเชื้อ': 'OPD คลินิกโรคติดเชื้อ',
+    'โรคติดเชื้อแพร่กระจายทางอากาศ (OPD)': 'OPD โรคติดเชื้อทางเดินหายใจ',
+    
+    'OPD OT': 'OPD กิจกรรมบำบัด (OT)',
+    'OPD-LAB': 'จุดรับสิ่งส่งตรวจ OPD LAB',
+    
+    'นอกเวลา': 'คลินิกนอกเวลาราชการ',
+    'opd นอกเวลา': 'คลินิกนอกเวลาราชการ',
+    'หัตถการและตรวจโรคนอกเวลาราชการ': 'คลินิกนอกเวลาราชการ',
+    
+    # --- แผนกและศูนย์เฉพาะทาง ---
+    'ER': 'อุบัติเหตุและฉุกเฉิน (ER)',
+    'er': 'อุบัติเหตุและฉุกเฉิน (ER)',
+    'อุบัติเหตุและฉุกเฉิน': 'อุบัติเหตุและฉุกเฉิน (ER)',
+    
+    'เคมีบำบัด': 'ศูนย์เคมีบำบัด',
+    'Cemo': 'ศูนย์เคมีบำบัด',
+    'ผู้ป่วยเคมีบำบัดและศูนย์ปลูกถ่ายเซลล์': 'ศูนย์เคมีบำบัดและปลูกถ่ายเซลล์',
+    'ผู้ป่วยนอกเคมีบำบัดและหอผู้ป่วยพิเศษเคมี': 'ศูนย์เคมีบำบัด',
+    'ผู้ป่วยนอกเคมีบำบัด': 'ศูนย์เคมีบำบัด',
+    
+    'โรคไตและไตเทียม': 'ศูนย์โรคไตและไตเทียม',
+    'ศูนย์์ไตเทียมประสิทธิภาพสูง': 'ศูนย์โรคไตและไตเทียม',
+    'opd โรคไตและไตเทียม': 'ศูนย์โรคไตและไตเทียม',
+    
+    'ผ่าตัดเปลี่ยนข้อ': 'ห้องผ่าตัด (OR)',
+    'ผ่่าตัดไม่ค้างคืน': 'ห้องผ่าตัดผู้ป่วยนอก (Day Surgery)',
+    
+    'THUMC': 'ศูนย์การแพทย์ธรรมศาสตร์',
+    'THAMC': 'ศูนย์การแพทย์ธรรมศาสตร์',
+    'ศูนย์การแพทย์ธรรมศาสตร์': 'ศูนย์การแพทย์ธรรมศาสตร์',
+    'ศูนย์การแพทย์': 'ศูนย์การแพทย์ธรรมศาสตร์',
+    
+    'จักษุ': 'จักษุวิทยา (OPD Eye)',
+    'Eye Dul 6': 'จักษุวิทยา (OPD Eye)',
+    
+    'รังสีร่วมรักษา': 'ศูนย์รังสีร่วมรักษา',
+    'ศูนย์โรคหัวใจและหลอดเลือด': 'ศูนย์โรคหัวใจและหลอดเลือด',
+    'ศูนย์โรคผิวหนัง': 'ศูนย์โรคผิวหนัง',
+    'ปลูกถ่ายอวัยวะ': 'ศูนย์ปลูกถ่ายอวัยวะ',
+    'ศูนย์รวมใจรักษ์': 'ศูนย์รวมใจรักษ์ (Palliative Care)',
+    'ส่องกล้อง': 'หน่วยส่องกล้อง (Endoscopy)',
+}
+
+# Grouping standardized wards into major clinical departments
+WARD_GROUPS = {
+    # อายุรกรรม
+    'อายุรกรรมชายสามัญ': 'อายุรกรรม (Medicine)',
+    'อายุรกรรมชายพิเศษ': 'อายุรกรรม (Medicine)',
+    'อายุรกรรมหญิงสามัญ': 'อายุรกรรม (Medicine)',
+    'อายุรกรรมหญิงพิเศษ': 'อายุรกรรม (Medicine)',
+    'อายุรกรรมกิตติวัฒนา': 'อายุรกรรม (Medicine)',
+    'อายุรกรรมความดันลบ': 'อายุรกรรม (Medicine)',
+    'อายุรกรรมทั่วไป': 'อายุรกรรม (Medicine)',
+    
+    # ศัลยกรรม
+    'ศัลยกรรม 1': 'ศัลยกรรม (Surgery)',
+    'ศัลยกรรม 2': 'ศัลยกรรม (Surgery)',
+    'ศัลยกรรม 3': 'ศัลยกรรม (Surgery)',
+    'ศัลยกรรมพิเศษ 1': 'ศัลยกรรม (Surgery)',
+    'ศัลยกรรมพิเศษ 2': 'ศัลยกรรม (Surgery)',
+    'ศัลยกรรมพิเศษ': 'ศัลยกรรม (Surgery)',
+    
+    # ศัลยกรรมกระดูก
+    'ศัลยกรรมกระดูกและข้อสามัญ': 'ศัลยกรรมกระดูก (Orthopedics)',
+    'ศัลยกรรมกระดูกและข้อพิเศษ': 'ศัลยกรรมกระดูก (Orthopedics)',
+    
+    # กุมารเวชกรรม
+    'กุมารเวชกรรม 1': 'กุมารเวชกรรม (Pediatrics)',
+    'กุมารเวชกรรม 2': 'กุมารเวชกรรม (Pediatrics)',
+    'กุมารเวชกรรมพิเศษ': 'กุมารเวชกรรม (Pediatrics)',
+    
+    # สูติ-นรีเวชกรรม
+    'สูติ-นรีเวชกรรมสามัญ': 'สูติ-นรีเวชกรรม (OB-GYN)',
+    'สูติ-นรีเวชกรรมพิเศษ': 'สูติ-นรีเวชกรรม (OB-GYN)',
+    'ห้องคลอด (LR)': 'สูติ-นรีเวชกรรม (OB-GYN)',
+    
+    # ผู้ป่วยวิกฤต (ICU)
+    'หอผู้ป่วยวิกฤตอายุรกรรม (MICU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยวิกฤตศัลยกรรม (SICU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยวิกฤตศัลยกรรมหัวใจและทรวงอก (CVT ICU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยวิกฤตระบบการหายใจ (RICU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยวิกฤตโรคหัวใจ (CCU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยทารกแรกเกิดวิกฤต (NICU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยวิกฤตกุมารเวชกรรม (PICU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยวิกฤตวิสัญญี': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    'หอผู้ป่วยวิกฤตแผลไหม้ (Burn ICU)': 'ผู้ป่วยวิกฤต (Critical Care / ICU)',
+    
+    # ระบบประสาท
+    'หอผู้ป่วยศัลยกรรมระบบประสาท': 'ระบบประสาท (Neuro / Stroke)',
+    'หอผู้ป่วยโรคหลอดเลือดสมอง (Stroke Unit)': 'ระบบประสาท (Neuro / Stroke)',
+    
+    # ห้องผู้ป่วยพิเศษ
+    'ห้องพิเศษยูงทอง 1': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'ห้องพิเศษยูงทอง 2': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'ห้องพิเศษยูงทอง 3': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'ห้องพิเศษยูงทอง 4': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'ห้องพิเศษยูงทอง 5': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'ห้องพิเศษยูงทอง 6': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'ห้องพิเศษยูงทอง': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'พิเศษอาคารดุลโสภาคย์ ชั้น 4': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'พิเศษอาคารดุลโสภาคย์ ชั้น 5': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'หอผู้ป่วยพิเศษเฉพาะทาง': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'หอผู้ป่วย VIP': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'หอผู้ป่วยปัญจา': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    'หอผู้ป่วย AY': 'ห้องผู้ป่วยพิเศษ (Private Wards)',
+    
+    # ผู้ป่วยนอก (OPD)
+    'OPD อายุรกรรม 1': 'ผู้ป่วยนอก (OPD)',
+    'OPD อายุรกรรม 2': 'ผู้ป่วยนอก (OPD)',
+    'OPD เวชศาสตร์ทั่วไป (GP)': 'ผู้ป่วยนอก (OPD)',
+    'OPD กุมารเวชกรรม': 'ผู้ป่วยนอก (OPD)',
+    'OPD ศัลยกรรม': 'ผู้ป่วยนอก (OPD)',
+    'OPD ศัลยกรรมกระดูกและข้อ': 'ผู้ป่วยนอก (OPD)',
+    'OPD สูติ-นรีเวชกรรม': 'ผู้ป่วยนอก (OPD)',
+    'หู คอ จมูก (ENT)': 'ผู้ป่วยนอก (OPD)',
+    'OPD หน่วยตรวจปลอดเชื้อ': 'ผู้ป่วยนอก (OPD)',
+    'OPD คลินิกโรคติดเชื้อ': 'ผู้ป่วยนอก (OPD)',
+    'OPD โรคติดเชื้อทางเดินหายใจ': 'ผู้ป่วยนอก (OPD)',
+    'OPD กิจกรรมบำบัด (OT)': 'ผู้ป่วยนอก (OPD)',
+    'จุดรับสิ่งส่งตรวจ OPD LAB': 'ผู้ป่วยนอก (OPD)',
+    'คลินิกนอกเวลาราชการ': 'ผู้ป่วยนอก (OPD)',
+    'จักษุวิทยา (OPD Eye)': 'ผู้ป่วยนอก (OPD)',
+    
+    # ฉุกเฉิน & ศูนย์เฉพาะทางอื่นๆ
+    'อุบัติเหตุและฉุกเฉิน (ER)': 'อุบัติเหตุและฉุกเฉิน (ER)',
+    'ศูนย์เคมีบำบัด': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'ศูนย์เคมีบำบัดและปลูกถ่ายเซลล์': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'ศูนย์โรคไตและไตเทียม': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'ห้องผ่าตัด (OR)': 'ห้องผ่าตัด/วิสัญญี',
+    'ห้องผ่าตัดผู้ป่วยนอก (Day Surgery)': 'ห้องผ่าตัด/วิสัญญี',
+    'ศูนย์การแพทย์ธรรมศาสตร์': 'ศูนย์การแพทย์ธรรมศาสตร์',
+    'ศูนย์รังสีร่วมรักษา': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'ศูนย์โรคหัวใจและหลอดเลือด': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'ศูนย์โรคผิวหนัง': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'ศูนย์ปลูกถ่ายอวัยวะ': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'ศูนย์รวมใจรักษ์ (Palliative Care)': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+    'หน่วยส่องกล้อง (Endoscopy)': 'ศูนย์ความเป็นเลิศ/เฉพาะทาง',
+}
+
+# Standard Category Labels
+CATEGORY_LABELS = {
+    'สิ่งส่งตรวจ': 'ปัญหาด้านสิ่งส่งตรวจ',
+    'ใบส่งตรวจ': 'ปัญหาด้านใบส่งตรวจ',
+    'ระบบจ่ายเงิน': 'ปัญหาด้านระบบการเงิน',
+    'ระบบสารสนเทศ': 'ปัญหาด้านระบบสารสนเทศ',
+    'อื่น ๆ': 'ปัญหาอื่นๆ / รายละเอียดเพิ่มเติม',
+}
+
+
+# ==============================================================================
+# 2. HELPER FUNCTIONS
+# ==============================================================================
+
+def standardize_ward(ward_raw: str) -> tuple[str, str]:
+    """
+    Standardize raw ward string. Returns (standard_name, ward_group).
+    """
+    if not isinstance(ward_raw, str) or not ward_raw.strip():
+        return 'ไม่ระบุหอผู้ป่วย', 'ไม่ระบุกลุ่ม'
+    
+    cleaned = ward_raw.strip()
+    
+    # Direct dictionary lookup
+    if cleaned in WARD_MAPPING:
+        std = WARD_MAPPING[cleaned]
+        grp = WARD_GROUPS.get(std, 'อื่น ๆ')
+        return std, grp
+    
+    # Case-insensitive / normalized search
+    lower_cleaned = cleaned.lower()
+    for raw_k, std_v in WARD_MAPPING.items():
+        if raw_k.lower() == lower_cleaned:
+            grp = WARD_GROUPS.get(std_v, 'อื่น ๆ')
+            return std_v, grp
+            
+    # Fuzzy heuristic fallbacks
+    if 'ยูงทอง' in cleaned:
+        std = 'ห้องพิเศษยูงทอง'
+        return std, 'ห้องผู้ป่วยพิเศษ (Private Wards)'
+    if 'ดุล' in cleaned:
+        std = 'พิเศษอาคารดุลโสภาคย์'
+        return std, 'ห้องผู้ป่วยพิเศษ (Private Wards)'
+    if 'er' in lower_cleaned or 'ฉุกเฉิน' in cleaned:
+        return 'อุบัติเหตุและฉุกเฉิน (ER)', 'อุบัติเหตุและฉุกเฉิน (ER)'
+    if 'ic' in lower_cleaned or 'วิกฤต' in cleaned:
+        return cleaned, 'ผู้ป่วยวิกฤต (Critical Care / ICU)'
+    if 'opd' in lower_cleaned:
+        return cleaned, 'ผู้ป่วยนอก (OPD)'
+
+    return cleaned, 'อื่น ๆ'
+
+
+def parse_sheet_month(sheet_name: str) -> tuple[int, int, str]:
+    """
+    Parse month and year from sheet name (e.g. 'ต.ค. 68', 'ม.ค.69').
+    Returns (month, year_ce, label_thai)
+    e.g. ('ต.ค. 68') -> (10, 2025, 'ต.ค. 2568')
+    """
+    sheet_clean = sheet_name.strip()
+    
+    month_found = None
+    for th_m, m_num in THAI_MONTHS.items():
+        if th_m in sheet_clean:
+            month_found = m_num
+            break
+            
+    year_found = None
+    y_match = re.search(r'(\d{2,4})', sheet_clean)
+    if y_match:
+        y_int = int(y_match.group(1))
+        if y_int < 100: # Two-digit BE year (e.g. 68, 69)
+            year_be = 2500 + y_int
+        elif y_int >= 2500: # Four-digit BE year (e.g. 2568)
+            year_be = y_int
+        else: # CE year (e.g. 2025)
+            year_be = y_int + 543
+        year_ce = year_be - 543
+        year_found = year_ce
+    else:
+        # Default current fiscal year
+        year_ce = 2026
+        year_be = 2569
+
+    if month_found:
+        label = f"{THAI_MONTH_NAMES_SHORT[month_found]} {year_be}"
+        return month_found, year_ce, label
+    
+    return None, None, None
+
+
+def find_header_row(df_raw: pd.DataFrame) -> int:
+    """
+    Search up to top 35 rows to locate header row containing key columns.
+    """
+    for idx in range(min(35, len(df_raw))):
+        row_vals = [str(x).strip() for x in df_raw.iloc[idx].values if pd.notna(x)]
+        row_text = " ".join(row_vals)
+        if ('วันที่' in row_text or 'Day' in row_text) and ('Ward' in row_text or 'หอผู้ป่วย' in row_text or 'สิ่งส่งตรวจ' in row_text):
+            return idx
+    return 0
+
+
+# ==============================================================================
+# 3. CORE DATA INGESTION & NORMALIZATION
+# ==============================================================================
+
+def process_dataframe_rows(df: pd.DataFrame, default_month: int = None, default_year: int = None, default_label: str = None) -> pd.DataFrame:
+    """
+    Clean and normalize raw dataframe table.
+    """
+    # Standard column mapping
+    col_map = {}
+    for c in df.columns:
+        c_str = str(c).strip()
+        if 'วันที่' in c_str:
+            col_map[c] = 'day'
+        elif 'เวลา' in c_str:
+            col_map[c] = 'time'
+        elif 'HN' in c_str or 'hn' in c_str:
+            col_map[c] = 'hn'
+        elif 'Ward' in c_str or 'หอผู้ป่วย' in c_str:
+            col_map[c] = 'ward_raw'
+        elif 'สิ่งส่งตรวจ' in c_str:
+            col_map[c] = 'specimen_issue'
+        elif 'ใบส่งตรวจ' in c_str:
+            col_map[c] = 'request_issue'
+        elif 'ระบบจ่ายเงิน' in c_str or 'การเงิน' in c_str:
+            col_map[c] = 'payment_issue'
+        elif 'ระบบสารสนเทศ' in c_str or 'LIS' in c_str:
+            col_map[c] = 'it_issue'
+        elif 'อื่น ๆ' in c_str or 'อื่นๆ' in c_str or 'รายละเอียด' in c_str:
+            col_map[c] = 'other_issue'
+        elif 'ผู้รับเรื่อง' in c_str:
+            col_map[c] = 'receiver'
+        elif 'สถานะ' in c_str:
+            col_map[c] = 'status'
+        elif 'หลักฐาน' in c_str:
+            col_map[c] = 'evidence'
+        elif 'ผู้รายงาน' in c_str:
+            col_map[c] = 'reporter'
+        elif 'การติดตาม' in c_str:
+            col_map[c] = 'followup'
+        elif 'การแก้ไข' in c_str:
+            col_map[c] = 'resolution'
+        elif 'ผู้ติดตาม' in c_str:
+            col_map[c] = 'follower'
+        elif 'หัวหน้างาน' in c_str:
+            col_map[c] = 'supervisor'
+
+    df = df.rename(columns=col_map)
+    
+    # Ensure mandatory columns exist
+    for req_col in ['day', 'time', 'hn', 'ward_raw', 'specimen_issue', 'request_issue',
+                    'payment_issue', 'it_issue', 'other_issue', 'receiver', 'status',
+                    'evidence', 'reporter', 'followup', 'resolution', 'follower', 'supervisor']:
+        if req_col not in df.columns:
+            df[req_col] = ''
+
+    # Filter out empty or header-like rows
+    def is_valid_row(r):
+        day_val = str(r['day']).strip()
+        ward_val = str(r['ward_raw']).strip()
+        if not day_val or day_val in ['วันที่', 'Day', 'nan', 'None']:
+            return False
+        # Must have at least some date or ward or issue
+        has_issue = any(str(r[c]).strip() not in ['', 'nan', 'None'] for c in ['specimen_issue', 'request_issue', 'payment_issue', 'it_issue', 'other_issue'])
+        return bool(ward_val or has_issue)
+
+    valid_mask = df.apply(is_valid_row, axis=1)
+    df = df[valid_mask].copy()
+
+    # Clean text values
+    for col in df.columns:
+        df[col] = df[col].astype(str).str.strip().replace({'nan': '', 'None': ''})
+
+    # Standardize Ward
+    ward_res = df['ward_raw'].apply(standardize_ward)
+    df['ward_standard'] = [w[0] for w in ward_res]
+    df['ward_group'] = [w[1] for w in ward_res]
+
+    # Process Day, Month, Year
+    # If default_month and default_year are given (from monthly sheet), use them
+    # Otherwise infer by day reset or context clues
+    cur_m = default_month or 10
+    cur_y = default_year or 2025
+    prev_d = -1
+    
+    dates = []
+    year_months = []
+    thai_labels = []
+    fiscal_quarters = []
+
+    for idx, row in df.iterrows():
+        raw_d = row['day']
+        try:
+            d_int = int(float(raw_d))
+        except:
+            d_int = 1
+        
+        # If this is a consolidated file without pre-assigned sheet month,
+        # detect month transitions when day drops significantly
+        if default_month is None:
+            if prev_d > 0 and d_int < prev_d:
+                # Month advances
+                cur_m += 1
+                if cur_m > 12:
+                    cur_m = 1
+                    cur_y += 1
+            prev_d = d_int
+        
+        # Clamp day to valid month range
+        max_days = [0, 31, 29 if cur_y % 4 == 0 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        clamped_d = max(1, min(d_int, max_days[cur_m]))
+        
+        date_iso = f"{cur_y:04d}-{cur_m:02d}-{clamped_d:02d}"
+        ym_str = f"{cur_y:04d}-{cur_m:02d}"
+        be_y = cur_y + 543
+        th_label = f"{THAI_MONTH_NAMES_SHORT[cur_m]} {be_y}"
+        
+        # Thai Fiscal Year Quarter:
+        # Q1: ต.ค.-ธ.ค. (Months 10, 11, 12)
+        # Q2: ม.ค.-มี.ค. (Months 1, 2, 3)
+        # Q3: เม.ย.-มิ.ย. (Months 4, 5, 6)
+        # Q4: ก.ค.-ก.ย. (Months 7, 8, 9)
+        if cur_m in [10, 11, 12]:
+            q_str = f"Q1/{be_y+1}"
+        elif cur_m in [1, 2, 3]:
+            q_str = f"Q2/{be_y}"
+        elif cur_m in [4, 5, 6]:
+            q_str = f"Q3/{be_y}"
+        else:
+            q_str = f"Q4/{be_y}"
+
+        dates.append(date_iso)
+        year_months.append(ym_str)
+        thai_labels.append(th_label)
+        fiscal_quarters.append(q_str)
+
+    df['date'] = dates
+    df['year_month'] = year_months
+    df['thai_month_year'] = thai_labels
+    df['fiscal_quarter'] = fiscal_quarters
+
+    # Clean status, followup, and resolution
+    df['status'] = df['status'].replace({'': 'รอตรวจสอบ'})
+    df['followup'] = df['followup'].replace({'': 'ติดตามแล้ว'})
+    df['resolution'] = df['resolution'].replace({'': 'แก้ไขแล้ว'})
+    
+    # Tag incidents
+    df['is_incident'] = df['supervisor'].str.contains('อุบัติการณ์', na=False) | \
+                        df['resolution'].str.contains('อุบัติการณ์', na=False) | \
+                        df['other_issue'].str.contains('อุบัติการณ์', na=False)
+
+    # Classify Specimen Type
+    def classify_specimen_type(r):
+        text = f"{r.get('specimen_issue', '')} {r.get('request_issue', '')} {r.get('other_issue', '')}".lower()
+        if any(k in text for k in ['hemo', 'h/c', 'เลือด', 'blood', 'c-line']):
+            return 'เลือด (Blood / Hemo)'
+        elif any(k in text for k in ['sputum', 'เสมหะ', 'afb', 'tb', 'tracheal']):
+            return 'เสมหะ / ทางเดินหายใจ (Sputum)'
+        elif any(k in text for k in ['urine', 'ปัสสาวะ', 'uc', 'u/c', 'msu']):
+            return 'ปัสสาวะ (Urine)'
+        elif any(k in text for k in ['stool', 'อุจจาระ', 'rectal']):
+            return 'อุจจาระ (Stool)'
+        elif any(k in text for k in ['pus', 'swab', 'หนอง', 'แผล', 'slide', 'slied']):
+            return 'หนอง / ป้ายแผล (Pus / Swab)'
+        elif any(k in text for k in ['fluid', 'synovial', 'peritoneal', 'csf', 'น้ำ']):
+            return 'สารน้ำ / CSF (Body Fluid)'
+        elif any(k in text for k in ['tissue', 'ชิ้นเนื้อ', 'เนื้อ']):
+            return 'ชิ้นเนื้อ (Tissue)'
+        else:
+            return 'อื่น ๆ / ไม่ระบุชัดเจน'
+
+    # Classify Risk Level
+    def classify_risk_level(r):
+        if r.get('is_incident', False) or 'อุบัติการณ์' in str(r.get('supervisor', '')):
+            return '🚨 ความเสี่ยงสูง / อุบัติการณ์'
+        elif str(r.get('resolution', '')) in ['แก้ไขไม่ได้', 'ยกเลิก', 'ขอยกเลิก']:
+            return '⚠️ ความเสี่ยงปานกลาง (แก้ไขไม่ได้/ยกเลิก)'
+        else:
+            return '✅ ความเสี่ยงต่ำ (แก้ไขได้)'
+
+    df['specimen_type'] = df.apply(classify_specimen_type, axis=1)
+    df['risk_level'] = df.apply(classify_risk_level, axis=1)
+
+    return df
+
+
+def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Ingest Excel (all monthly sheets) or CSV file.
+    Returns:
+      df_cases: Case-level DataFrame (1 row per rejection transaction)
+      df_causes: Cause-level Tidy DataFrame (unpivoted, 1 row per rejection reason)
+    """
+    all_dfs = []
+    
+    # Check if file_source is str or file-like buffer
+    is_excel = False
+    is_csv = False
+
+    if isinstance(file_source, str):
+        if file_source.endswith('.xlsx') or file_source.endswith('.xls'):
+            is_excel = True
+        elif file_source.endswith('.csv'):
+            is_csv = True
+    else:
+        # Buffer
+        fname = getattr(file_source, 'name', '').lower()
+        if fname.endswith('.xlsx') or fname.endswith('.xls'):
+            is_excel = True
+        elif fname.endswith('.csv'):
+            is_csv = True
+        else:
+            # Try excel first
+            is_excel = True
+
+    if is_excel:
+        xl = pd.ExcelFile(file_source)
+        all_sheet_names = xl.sheet_names
+        
+        # Check if there are monthly sheets (e.g. contains 'ต.ค.', 'พ.ย.', etc.)
+        monthly_sheets = []
+        for s in all_sheet_names:
+            if s.strip() in ['สรุป', 'Summary', 'All', 'Sheet1', 'sheet1']:
+                continue
+            m, y, lbl = parse_sheet_month(s)
+            if m is not None:
+                monthly_sheets.append((s, m, y, lbl))
+
+        if monthly_sheets:
+            # Read from every monthly sheet
+            for s_name, m_num, y_num, m_lbl in monthly_sheets:
+                df_raw = xl.parse(s_name, header=None)
+                h_idx = find_header_row(df_raw)
+                df_data = xl.parse(s_name, skiprows=h_idx)
+                # Clean headers
+                df_data.columns = [str(c).strip() for c in df_data.columns]
+                processed_df = process_dataframe_rows(df_data, default_month=m_num, default_year=y_num, default_label=m_lbl)
+                processed_df['source_sheet'] = s_name
+                all_dfs.append(processed_df)
+        else:
+            # Read from default/first sheet (e.g. 'สรุป')
+            target_sheet = 'สรุป' if 'สรุป' in all_sheet_names else all_sheet_names[0]
+            df_raw = xl.parse(target_sheet, header=None)
+            h_idx = find_header_row(df_raw)
+            df_data = xl.parse(target_sheet, skiprows=h_idx)
+            df_data.columns = [str(c).strip() for c in df_data.columns]
+            processed_df = process_dataframe_rows(df_data)
+            processed_df['source_sheet'] = target_sheet
+            all_dfs.append(processed_df)
+
+    else:
+        # CSV file
+        try:
+            df_raw = pd.read_csv(file_source, header=None, encoding='utf-8')
+        except:
+            if hasattr(file_source, 'seek'):
+                file_source.seek(0)
+            df_raw = pd.read_csv(file_source, header=None, encoding='cp874')
+            
+        h_idx = find_header_row(df_raw)
+        if hasattr(file_source, 'seek'):
+            file_source.seek(0)
+        try:
+            df_data = pd.read_csv(file_source, skiprows=h_idx, encoding='utf-8')
+        except:
+            if hasattr(file_source, 'seek'):
+                file_source.seek(0)
+            df_data = pd.read_csv(file_source, skiprows=h_idx, encoding='cp874')
+            
+        df_data.columns = [str(c).strip() for c in df_data.columns]
+        processed_df = process_dataframe_rows(df_data)
+        processed_df['source_sheet'] = 'CSV Data'
+        all_dfs.append(processed_df)
+
+    # Combine all
+    if not all_dfs:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df_cases = pd.concat(all_dfs, ignore_index=True)
+    df_cases['case_id'] = [f"REJ-{i+1:04d}" for i in range(len(df_cases))]
+
+    # Unpivot causes into Tidy format
+    df_causes = unpivot_causes(df_cases)
+
+    return df_cases, df_causes
+
+
+def unpivot_causes(df_cases: pd.DataFrame) -> pd.DataFrame:
+    """
+    Unpivots the 5 rejection cause columns:
+      - สิ่งส่งตรวจ
+      - ใบส่งตรวจ
+      - ระบบจ่ายเงิน
+      - ระบบสารสนเทศ
+      - อื่น ๆ
+    Into a normalized Tidy DataFrame where each row represents one distinct rejection cause.
+    """
+    cause_rows = []
+    
+    cause_cols = [
+        ('specimen_issue', 'ปัญหาด้านสิ่งส่งตรวจ'),
+        ('request_issue', 'ปัญหาด้านใบส่งตรวจ'),
+        ('payment_issue', 'ปัญหาด้านระบบการเงิน'),
+        ('it_issue', 'ปัญหาด้านระบบสารสนเทศ'),
+    ]
+
+    for _, row in df_cases.iterrows():
+        base_info = {
+            'case_id': row['case_id'],
+            'date': row['date'],
+            'time': row['time'],
+            'year_month': row['year_month'],
+            'thai_month_year': row['thai_month_year'],
+            'fiscal_quarter': row['fiscal_quarter'],
+            'hn': row['hn'],
+            'ward_raw': row['ward_raw'],
+            'ward_standard': row['ward_standard'],
+            'ward_group': row['ward_group'],
+            'receiver': row['receiver'],
+            'status': row['status'],
+            'evidence': row['evidence'],
+            'reporter': row['reporter'],
+            'followup': row['followup'],
+            'resolution': row['resolution'],
+            'follower': row['follower'],
+            'supervisor': row['supervisor'],
+            'is_incident': row['is_incident'],
+            'specimen_type': row.get('specimen_type', 'อื่น ๆ / ไม่ระบุชัดเจน'),
+            'risk_level': row.get('risk_level', '✅ ความเสี่ยงต่ำ (แก้ไขได้)'),
+            'notes': row['other_issue']
+        }
+        
+        found_any = False
+        
+        # Check standard 4 categories
+        for col_name, cat_label in cause_cols:
+            val = str(row.get(col_name, '')).strip()
+            if val and val not in ['', 'nan', 'None', '-']:
+                # Split multiple causes separated by comma or semicolon if present
+                sub_reasons = [x.strip() for x in re.split(r'[,;/\n]', val) if x.strip()]
+                for sr in sub_reasons:
+                    entry = base_info.copy()
+                    entry['category'] = cat_label
+                    entry['reason'] = sr
+                    cause_rows.append(entry)
+                    found_any = True
+
+        # Check 'other_issue' (อื่น ๆ)
+        other_val = str(row.get('other_issue', '')).strip()
+        if other_val and other_val not in ['', 'nan', 'None', '-']:
+            # If no primary cause was marked in the 4 columns, classify other_issue
+            if not found_any:
+                cat_label = 'ปัญหาอื่นๆ / รายละเอียดเพิ่มเติม'
+                if 'สไลด์' in other_val or 'Slide' in other_val or 'สิ่งส่งตรวจ' in other_val or 'หลอด' in other_val or 'ขวด' in other_val or 'กระปุก' in other_val:
+                    cat_label = 'ปัญหาด้านสิ่งส่งตรวจ'
+                elif 'Request' in other_val or 'ใบ' in other_val or 'คีย์' in other_val or 'ระบบ E-phis' in other_val:
+                    cat_label = 'ปัญหาด้านใบส่งตรวจ'
+                elif 'จ่ายเงิน' in other_val or 'การเงิน' in other_val or 'ชำระ' in other_val:
+                    cat_label = 'ปัญหาด้านระบบการเงิน'
+                elif 'LIS' in other_val:
+                    cat_label = 'ปัญหาด้านระบบสารสนเทศ'
+
+                entry = base_info.copy()
+                entry['category'] = cat_label
+                entry['reason'] = other_val[:80] + ('...' if len(other_val) > 80 else '')
+                cause_rows.append(entry)
+                found_any = True
+                
+        # If completely empty
+        if not found_any:
+            entry = base_info.copy()
+            entry['category'] = 'ไม่ระบุสาเหตุชัดเจน'
+            entry['reason'] = 'ไม่ระบุสาเหตุ'
+            cause_rows.append(entry)
+
+    df_causes = pd.DataFrame(cause_rows)
+    return df_causes
+
+
+# ==============================================================================
+# 4. METRICS & AGGREGATIONS
+# ==============================================================================
+
+def get_kpis(df_cases: pd.DataFrame, df_causes: pd.DataFrame) -> dict:
+    """
+    Compute headline KPI metrics for executive overview.
+    """
+    total_cases = len(df_cases)
+    if total_cases == 0:
+        return {
+            'total_cases': 0,
+            'top_ward': '-',
+            'top_ward_cases': 0,
+            'top_cause': '-',
+            'top_cause_count': 0,
+            'resolution_rate': 0.0,
+            'incident_count': 0
+        }
+    
+    # Top Ward
+    ward_counts = df_cases['ward_standard'].value_counts()
+    top_ward = ward_counts.index[0] if len(ward_counts) > 0 else '-'
+    top_ward_cases = int(ward_counts.iloc[0]) if len(ward_counts) > 0 else 0
+    
+    # Top Cause
+    cause_counts = df_causes['reason'].value_counts()
+    top_cause = cause_counts.index[0] if len(cause_counts) > 0 else '-'
+    top_cause_count = int(cause_counts.iloc[0]) if len(cause_counts) > 0 else 0
+    
+    # Resolution Rate
+    resolved_count = df_cases['resolution'].str.contains('แก้ไขแล้ว|ยกเลิก', na=False).sum()
+    resolution_rate = round((resolved_count / total_cases) * 100, 1)
+    
+    # Incidents
+    incident_count = int(df_cases['is_incident'].sum())
+    
+    return {
+        'total_cases': total_cases,
+        'top_ward': top_ward,
+        'top_ward_cases': top_ward_cases,
+        'top_cause': top_cause,
+        'top_cause_count': top_cause_count,
+        'resolution_rate': resolution_rate,
+        'incident_count': incident_count
+    }
+
+
+def get_monthly_trend(df_cases: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate rejection cases over time by Year-Month.
+    """
+    if df_cases.empty:
+        return pd.DataFrame(columns=['year_month', 'thai_month_year', 'count'])
+    
+    trend = df_cases.groupby(['year_month', 'thai_month_year']).size().reset_index(name='count')
+    trend = trend.sort_values('year_month')
+    return trend
+
+
+def get_top_wards(df_cases: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    """
+    Get top wards with highest specimen rejection counts.
+    """
+    if df_cases.empty:
+        return pd.DataFrame(columns=['ward_standard', 'ward_group', 'count'])
+    
+    ward_df = df_cases.groupby(['ward_standard', 'ward_group']).size().reset_index(name='count')
+    ward_df = ward_df.sort_values('count', ascending=False).head(top_n)
+    return ward_df
+
+
+def get_category_distribution(df_causes: pd.DataFrame) -> pd.DataFrame:
+    """
+    Get breakdown by rejection category.
+    """
+    if df_causes.empty:
+        return pd.DataFrame(columns=['category', 'count', 'pct'])
+    
+    cat_df = df_causes['category'].value_counts().reset_index()
+    cat_df.columns = ['category', 'count']
+    cat_df['pct'] = round((cat_df['count'] / cat_df['count'].sum()) * 100, 1)
+    return cat_df
+
+
+def get_top_reasons(df_causes: pd.DataFrame, top_n: int = 10, category: str = None) -> pd.DataFrame:
+    """
+    Get top rejection reasons, optionally filtered by category.
+    """
+    if df_causes.empty:
+        return pd.DataFrame(columns=['reason', 'category', 'count'])
+    
+    filtered = df_causes
+    if category and category != 'ทั้งหมด':
+        filtered = filtered[filtered['category'] == category]
+        
+    reason_df = filtered.groupby(['reason', 'category']).size().reset_index(name='count')
+    reason_df = reason_df.sort_values('count', ascending=False).head(top_n)
+    return reason_df
+
+
+def get_ward_cause_crosstab(df_causes: pd.DataFrame, top_wards_n: int = 12) -> pd.DataFrame:
+    """
+    Cross-tabulation matrix of Top Wards x Rejection Categories.
+    """
+    if df_causes.empty:
+        return pd.DataFrame()
+        
+    top_wards = df_causes['ward_standard'].value_counts().head(top_wards_n).index.tolist()
+    sub_df = df_causes[df_causes['ward_standard'].isin(top_wards)]
+    
+    ct = pd.crosstab(sub_df['ward_standard'], sub_df['category'])
+    # Re-order index by total counts
+    ct['total'] = ct.sum(axis=1)
+    ct = ct.sort_values('total', ascending=True)
+    ct = ct.drop(columns=['total'])
+    return ct
+
+
+def get_unmapped_wards(df_cases: pd.DataFrame) -> pd.DataFrame:
+    """
+    Audit tool: identify ward names that were not in WARD_MAPPING dictionary.
+    """
+    if df_cases.empty:
+        return pd.DataFrame(columns=['ward_raw', 'assigned_standard', 'assigned_group', 'case_count'])
+        
+    unmapped = []
+    counts = df_cases['ward_raw'].value_counts()
+    for raw_w, cnt in counts.items():
+        if raw_w not in WARD_MAPPING:
+            std, grp = standardize_ward(raw_w)
+            unmapped.append({
+                'ward_raw': raw_w,
+                'assigned_standard': std,
+                'assigned_group': grp,
+                'case_count': cnt
+            })
+    return pd.DataFrame(unmapped)

@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+.streamlit/secrets.toml
+.DS_Store
+Thumbs.db
+แบบบันทึกการปฏิเสธสิ่งส่งตรวจ.xlsx
