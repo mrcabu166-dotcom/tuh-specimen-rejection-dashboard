@@ -665,11 +665,16 @@ def process_dataframe_rows(df: pd.DataFrame, default_month: int = None, default_
     def is_valid_row(r):
         day_val = str(r['day']).strip()
         ward_val = str(r['ward_raw']).strip()
-        if not day_val or day_val in ['วันที่', 'Day', 'nan', 'None']:
+        has_ward = ward_val not in ['', 'nan', 'None']
+        if day_val in ['วันที่', 'Day']:
             return False
         # Must have at least some date or ward or issue
         has_issue = any(str(r[c]).strip() not in ['', 'nan', 'None'] for c in ['specimen_issue', 'request_issue', 'payment_issue', 'it_issue', 'other_issue'])
-        return bool(ward_val or has_issue)
+        if day_val in ['', 'nan', 'None']:
+            # Keep incomplete records so the date audit can report them.
+            has_identity = any(str(r[c]).strip() not in ['', 'nan', 'None'] for c in ['hn', 'time'])
+            return bool(has_ward and (has_issue or has_identity))
+        return bool(has_ward or has_issue)
 
     valid_mask = df.apply(is_valid_row, axis=1)
     df = df[valid_mask].copy()
@@ -695,30 +700,33 @@ def process_dataframe_rows(df: pd.DataFrame, default_month: int = None, default_
     thai_labels = []
     fiscal_quarters = []
     fiscal_year_labels = []
+    valid_dates = []
 
     for idx, row in df.iterrows():
         raw_d = row['day']
         try:
-            d_int = int(float(raw_d))
-        except:
+            d_numeric = float(raw_d)
+            d_int = int(d_numeric)
+            day_is_integer = d_numeric.is_integer()
+        except (TypeError, ValueError, OverflowError):
             d_int = 1
+            day_is_integer = False
         
         # If this is a consolidated file without pre-assigned sheet month,
         # detect month transitions when day drops significantly
         if default_month is None:
-            if prev_d > 0 and d_int < prev_d:
+            if day_is_integer and prev_d > 0 and d_int < prev_d:
                 # Month advances
                 cur_m += 1
                 if cur_m > 12:
                     cur_m = 1
                     cur_y += 1
-            prev_d = d_int
+            if day_is_integer:
+                prev_d = d_int
         
-        # Clamp day to valid month range
         max_days = [0, 31, 29 if cur_y % 4 == 0 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        clamped_d = max(1, min(d_int, max_days[cur_m]))
-        
-        date_iso = f"{cur_y:04d}-{cur_m:02d}-{clamped_d:02d}"
+        date_is_valid = day_is_integer and 1 <= d_int <= max_days[cur_m]
+        date_iso = f"{cur_y:04d}-{cur_m:02d}-{d_int:02d}" if date_is_valid else None
         ym_str = f"{cur_y:04d}-{cur_m:02d}"
         be_y = cur_y + 543
         th_label = f"{THAI_MONTH_NAMES_SHORT[cur_m]} {be_y}"
@@ -744,12 +752,14 @@ def process_dataframe_rows(df: pd.DataFrame, default_month: int = None, default_
         thai_labels.append(th_label)
         fiscal_quarters.append(q_str)
         fiscal_year_labels.append(f"ปีงบประมาณ {fiscal_year}")
+        valid_dates.append(date_is_valid)
 
     df['date'] = dates
     df['year_month'] = year_months
     df['thai_month_year'] = thai_labels
     df['fiscal_quarter'] = fiscal_quarters
     df['fiscal_year'] = fiscal_year_labels
+    df['date_valid'] = valid_dates
 
     # Clean status, followup, and resolution
     df['status'] = df['status'].replace({'': 'รอตรวจสอบ'})

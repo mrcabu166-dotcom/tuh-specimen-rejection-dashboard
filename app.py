@@ -10,6 +10,7 @@ import os
 import io
 import re
 import base64
+import time
 import requests
 import pandas as pd
 import numpy as np
@@ -457,7 +458,7 @@ GOOGLE_SHEET_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_I
 DEFAULT_MONTHLY_QUALITY_TARGET = 30
 
 @st.cache_data(show_spinner="กำลังซิงก์และประมวลผลข้อมูล...", ttl=900)
-def load_data(file_source, cache_version="merged-headers-20260923"):
+def load_data(file_source, cache_version="audit-fixes-20260923"):
     source_for_cleaner = file_source
     if isinstance(file_source, str) and file_source.startswith(('http://', 'https://')):
         response = requests.get(file_source, timeout=45)
@@ -466,6 +467,16 @@ def load_data(file_source, cache_version="merged-headers-20260923"):
         source_for_cleaner.name = "google_sheet_export.xlsx"
 
     df_cases, df_causes = cleaner.load_and_consolidate(source_for_cleaner)
+    duplicate_columns = [
+        c for c in ['date', 'time', 'hn', 'ward_raw', 'specimen_issue', 'request_issue', 'payment_issue', 'it_issue', 'other_issue']
+        if c in df_cases.columns
+    ]
+    if duplicate_columns and 'hn' in df_cases.columns:
+        hn = df_cases['hn'].astype(str).str.strip()
+        has_hn = ~hn.isin(['', 'nan', 'None', 'HN-ปิดบัง'])
+        df_cases['possible_duplicate'] = has_hn & df_cases.duplicated(subset=duplicate_columns, keep=False)
+    else:
+        df_cases['possible_duplicate'] = False
 
     # Backward-compatible fallback for cached/older cleaned data that predates
     # the fiscal_year column. Derive it from the normalized ISO date.
@@ -485,7 +496,17 @@ def load_data(file_source, cache_version="merged-headers-20260923"):
         return result
 
     def mask_public_identifiers(df):
-        result = df.copy()
+        public_columns = {
+            'case_id', 'date', 'date_valid', 'day', 'time', 'year_month',
+            'thai_month_year', 'fiscal_quarter', 'fiscal_year', 'source_sheet',
+            'hn', 'ward_raw', 'ward_standard', 'ward_group', 'specimen_issue',
+            'request_issue', 'payment_issue', 'it_issue', 'other_issue',
+            'receiver', 'status', 'evidence', 'reporter', 'followup',
+            'resolution', 'follower', 'supervisor', 'is_incident',
+            'specimen_type', 'risk_level', 'category', 'reason', 'notes',
+            'possible_duplicate',
+        }
+        result = df[[col for col in df.columns if col in public_columns]].copy()
         masks = {
             'hn': 'HN-ปิดบัง',
             'receiver': 'ปิดบัง',
@@ -497,6 +518,15 @@ def load_data(file_source, cache_version="merged-headers-20260923"):
             if col in result.columns:
                 values = result[col].astype(str).str.strip()
                 result[col] = values.where(values.isin(['', 'nan', 'None']), replacement)
+        # HN-like numbers can also be typed into free-text fields. Scrub those
+        # before charts, tables, or exports can expose them on the public app.
+        for col in ['specimen_issue', 'request_issue', 'payment_issue', 'it_issue',
+                    'other_issue', 'reason', 'notes', 'status', 'resolution',
+                    'followup', 'evidence']:
+            if col in result.columns:
+                result[col] = result[col].astype(str).str.replace(
+                    r'(?<!\d)\d{6,10}(?!\d)', '[เลขอ้างอิงปิดบัง]', regex=True
+                )
         return result
 
     return mask_public_identifiers(ensure_fiscal_year(df_cases)), mask_public_identifiers(ensure_fiscal_year(df_causes))
@@ -520,18 +550,25 @@ def render_popover_multiselect(
     When opened: Displays search input, Select All / Clear All buttons, and a scrollable checkbox list.
     """
     all_options_set = set(all_options)
+    previous_options_key = f"_available_{state_key}"
+    previous_options = set(st.session_state.get(previous_options_key, all_options))
     
     # Initialize session state if first run
     if state_key not in st.session_state:
         st.session_state[state_key] = set(all_options)
-        
+
     current_selected = set(st.session_state[state_key])
-    
-    # Cascade validation: keep only options present in current all_options
-    valid_selected = current_selected.intersection(all_options_set)
-    if len(current_selected) > 0 and len(valid_selected) != len(current_selected):
-        st.session_state[state_key] = valid_selected
-        current_selected = valid_selected
+    # Preserve the user's "all" choice when new months, Wards, or reasons
+    # arrive from Google Sheets. Explicit partial selections remain partial.
+    if current_selected == previous_options:
+        current_selected = set(all_options)
+    else:
+        current_selected &= all_options_set
+    st.session_state[state_key] = current_selected
+    st.session_state[previous_options_key] = set(all_options)
+    if previous_options != all_options_set:
+        for opt in all_options:
+            st.session_state[f"chk_{state_key}_{opt}"] = opt in current_selected
 
     total_count = len(all_options)
     selected_count = len(current_selected)
@@ -651,6 +688,9 @@ def render_sidebar():
         try:
             df_cases_all, df_causes_all = load_data(active_source)
         except Exception as e:
+            if uploaded_file is not None:
+                st.error(f"อ่านไฟล์ที่อัปโหลดไม่ได้: {e}")
+                st.stop()
             google_sync_error = e if active_source == GOOGLE_SHEET_XLSX_URL else None
             active_source = None
             for p in DEFAULT_EXCEL_PATHS:
@@ -1340,7 +1380,7 @@ def render_quality_target(df_cases: pd.DataFrame):
         f"<div style='display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;margin-bottom:0.8rem;'>"
         f"<span style='font-weight:700;color:#334155;'>เดือนล่าสุด: {latest['thai_month_year']} · {int(latest['count']):,} เคส</span>"
         f"<span style='background:{latest_bg};color:{latest_fg};padding:0.25rem 0.7rem;border-radius:999px;font-weight:700;'>{latest_status}</span>"
-        f"<span style='font-size:0.78rem;color:#64748B;'>เกณฑ์เตือน {warning_limit:,} เคสขึ้นไป</span></div>",
+        f"<span style='font-size:0.78rem;color:#64748B;'>สีแดงตั้งแต่ {warning_limit + 1:,} เคส</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -1367,24 +1407,32 @@ def render_data_quality_check(df_cases: pd.DataFrame, df_causes: pd.DataFrame):
     cases = df_cases.copy()
     causes = df_causes.copy()
 
-    parsed_dates = pd.to_datetime(cases.get('date'), errors='coerce')
-    raw_days = pd.to_numeric(cases.get('day'), errors='coerce')
-    max_days = parsed_dates.dt.days_in_month
-    invalid_date_mask = parsed_dates.isna() | raw_days.isna() | (raw_days < 1) | (raw_days > max_days)
+    if 'date_valid' in cases.columns:
+        invalid_date_mask = ~cases['date_valid'].fillna(False).astype(bool)
+    else:
+        parsed_dates = pd.to_datetime(cases.get('date'), errors='coerce')
+        raw_days = pd.to_numeric(cases.get('day'), errors='coerce')
+        max_days = parsed_dates.dt.days_in_month
+        invalid_date_mask = parsed_dates.isna() | raw_days.isna() | (raw_days < 1) | (raw_days > max_days) | raw_days.mod(1).ne(0)
 
-    duplicate_columns = [
-        c for c in ['date', 'time', 'ward_raw', 'specimen_issue', 'request_issue', 'payment_issue', 'it_issue', 'other_issue']
-        if c in cases.columns
-    ]
-    duplicate_mask = cases.duplicated(subset=duplicate_columns, keep=False) if duplicate_columns else pd.Series(False, index=cases.index)
+    if 'possible_duplicate' in cases.columns:
+        duplicate_mask = cases['possible_duplicate'].fillna(False).astype(bool)
+    else:
+        duplicate_columns = [
+            c for c in ['date', 'time', 'hn', 'ward_raw', 'specimen_issue', 'request_issue', 'payment_issue', 'it_issue', 'other_issue']
+            if c in cases.columns
+        ]
+        duplicate_mask = cases.duplicated(subset=duplicate_columns, keep=False) if duplicate_columns else pd.Series(False, index=cases.index)
 
     unmapped = cleaner.get_unmapped_wards(cases)
     known_categories = set(cleaner.CATEGORY_LABELS.values()) | {'ไม่ระบุสาเหตุชัดเจน'}
-    uncategorized_mask = (~causes['category'].isin(known_categories)) | causes['category'].eq('ไม่ระบุสาเหตุชัดเจน') | causes['reason'].eq('ไม่ระบุสาเหตุ')
+    uncategorized_mask = ((~causes['category'].isin(known_categories))
+                          | causes['category'].isin(['ไม่ระบุสาเหตุชัดเจน', 'ปัญหาอื่นๆ / รายละเอียดเพิ่มเติม'])
+                          | causes['reason'].eq('ไม่ระบุสาเหตุ'))
 
     quality_items = [
         ('📅 วันที่ผิด/ไม่ครบ', int(invalid_date_mask.sum())),
-        ('🧬 ข้อมูลซ้ำ', int(duplicate_mask.sum())),
+        ('🧬 ข้อมูลที่อาจซ้ำ', int(duplicate_mask.sum())),
         ('🏥 Ward ใหม่/รอเพิ่ม mapping', int(len(unmapped))),
         ('🧩 สาเหตุยังไม่จัดกลุ่ม', int(uncategorized_mask.sum())),
     ]
@@ -1416,6 +1464,17 @@ def render_data_quality_check(df_cases: pd.DataFrame, df_causes: pd.DataFrame):
         st.dataframe(causes.loc[uncategorized_mask, cause_cols].head(100), width="stretch", hide_index=True)
     if not any(count > 0 for _, count in quality_items):
         st.success("✅ ไม่พบรายการที่ต้องแก้ไขจากการตรวจคุณภาพข้อมูลรอบนี้")
+
+
+@st.fragment(run_every="15m")
+def refresh_google_data_while_open():
+    """Trigger a full refresh for an open dashboard every fifteen minutes."""
+    now = time.monotonic()
+    next_refresh = st.session_state.setdefault("_next_google_refresh", now + 900)
+    if now >= next_refresh:
+        st.session_state["_next_google_refresh"] = now + 900
+        load_data.clear()
+        st.rerun()
 
 
 # ==============================================================================
@@ -1512,12 +1571,15 @@ def main():
             </div>
         """, unsafe_allow_html=True)
         if not df_causes.empty:
-            pareto = (
+            pareto_all = (
                 df_causes.groupby('reason').size().reset_index(name='count')
                 .sort_values('count', ascending=False)
-                .head(15)
             )
-            pareto['cumulative_pct'] = pareto['count'].cumsum() / pareto['count'].sum() * 100
+            all_cumulative = pareto_all['count'].cumsum() / pareto_all['count'].sum()
+            causes_to_80 = int((all_cumulative < 0.8).sum() + 1)
+            pareto = pareto_all.head(max(15, causes_to_80)).copy()
+            pareto['cumulative_pct'] = pareto['count'].cumsum() / pareto_all['count'].sum() * 100
+            st.caption(f"สาเหตุ {causes_to_80:,} อันดับแรกคิดเป็นอย่างน้อย 80% ของทั้งหมด")
             fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
             fig_pareto.add_trace(
                 go.Bar(x=pareto['reason'], y=pareto['count'], name='จำนวนครั้ง', marker_color='#6c5070'),
@@ -1529,7 +1591,8 @@ def main():
             )
             fig_pareto.update_yaxes(title_text='จำนวนครั้ง', secondary_y=False, gridcolor='#F1F5F9')
             fig_pareto.update_yaxes(title_text='เปอร์เซ็นต์สะสม', range=[0, 105], secondary_y=True, ticksuffix='%')
-            fig_pareto.update_layout(height=390, margin=dict(l=20, r=20, t=20, b=110), plot_bgcolor='rgba(0,0,0,0)', font=dict(family='Noto Sans Thai', size=11), xaxis=dict(tickangle=-35, title=''))
+            fig_pareto.add_hline(y=80, line_dash='dash', line_color='#94A3B8', secondary_y=True)
+            fig_pareto.update_layout(height=500, margin=dict(l=20, r=20, t=20, b=170), plot_bgcolor='rgba(0,0,0,0)', font=dict(family='Noto Sans Thai', size=11), xaxis=dict(tickangle=-50, title='', automargin=True))
             st.plotly_chart(fig_pareto, width="stretch")
         else:
             st.info("ไม่มีข้อมูลสำหรับสร้าง Pareto")
@@ -1749,18 +1812,20 @@ def main():
     # --------------------------------------------------------------------------
     with tab5:
         st.markdown("<div class='chart-card'><div class='chart-title'>🩺 Data Quality Check · ตรวจสอบคุณภาพข้อมูล</div>", unsafe_allow_html=True)
-        st.caption("ตรวจชื่อ Ward ใหม่ วันที่ผิด ข้อมูลซ้ำ และสาเหตุที่ยังไม่ได้จัดกลุ่มจากข้อมูลทั้งหมดที่เชื่อมอยู่")
+        st.caption("ตรวจชื่อ Ward ใหม่ วันที่ผิด ข้อมูลที่อาจซ้ำ และสาเหตุที่ยังไม่ชัดเจนหรืออยู่ในกลุ่มอื่น ๆ จากข้อมูลทั้งหมดที่เชื่อมอยู่")
         render_data_quality_check(bundle['df_cases_all'], bundle['df_causes_all'])
 
         st.markdown("<hr style='margin:1.2rem 0;border:none;border-top:1px solid #E2E8F0;'>", unsafe_allow_html=True)
         st.markdown("**🩺 ตรวจสอบความถูกต้องของชื่อหอผู้ป่วย (Ward Mapping Audit)**")
         unmapped = cleaner.get_unmapped_wards(bundle['df_cases_all'])
+        raw_ward_count = bundle['df_cases_all']['ward_raw'].nunique()
+        mapping_coverage = (raw_ward_count - len(unmapped)) / raw_ward_count * 100 if raw_ward_count else 100.0
         
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.metric("จำนวนชื่อ Ward ดิบทั้งหมดในไฟล์", f"{bundle['df_cases_all']['ward_raw'].nunique():,} รูปแบบ")
+            st.metric("จำนวนชื่อ Ward ดิบทั้งหมดในไฟล์", f"{raw_ward_count:,} รูปแบบ")
         with m2:
-            st.metric("อัตราการจับคู่ชื่อมาตรฐาน (Coverage)", "100.0%", help="จับคู่เข้ากับพจนานุกรมชื่อมาตรฐานของโรงพยาบาลได้ครบถ้วน")
+            st.metric("อัตราการจับคู่ชื่อมาตรฐาน (Coverage)", f"{mapping_coverage:.1f}%", help="สัดส่วนชื่อ Ward ที่พบตรงในพจนานุกรมชื่อมาตรฐาน")
         with m3:
             st.metric("ชื่อที่ไม่รู้จัก (Unmapped)", f"{len(unmapped)} รายการ")
             
@@ -1781,3 +1846,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    refresh_google_data_while_open()
