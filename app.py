@@ -794,10 +794,25 @@ def apply_filters(bundle: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
 # 6. HEADER & QUICK FILTER SUMMARY BAR
 # ==============================================================================
 
-def render_header():
+def render_header(df_cases: pd.DataFrame | None = None):
     """
     Renders a compact, clean hospital header bar.
     """
+    fiscal_years = set()
+    if df_cases is not None and not df_cases.empty and {'date'}.issubset(df_cases.columns):
+        parsed_dates = pd.to_datetime(df_cases['date'], errors='coerce')
+        for dt in parsed_dates.dropna():
+            fiscal_years.add(int(dt.year + (1 if dt.month >= 10 else 0) + 543))
+    if fiscal_years:
+        ordered_fy = sorted(fiscal_years)
+        fiscal_label = (
+            f"ปีงบประมาณ {ordered_fy[0]}"
+            if len(ordered_fy) == 1
+            else f"ปีงบประมาณ {ordered_fy[0]}–{ordered_fy[-1]}"
+        )
+    else:
+        fiscal_label = "ปีงบประมาณ -"
+
     logo_html = (
         f"<img src='{LOGO_DATA_URI}' alt='TUH logo' style='width:52px;height:52px;object-fit:contain;border-radius:12px;background:#FFFFFF;'>"
         if LOGO_DATA_URI else "🧪"
@@ -812,10 +827,10 @@ def render_header():
             </div>
         </div>
         <div>
-            <span class="header-badge">ปีงบประมาณ 2569</span>
+            <span class="header-badge">{fiscal_label}</span>
         </div>
     </div>
-    """.format(logo_html=logo_html), unsafe_allow_html=True)
+    """.format(logo_html=logo_html, fiscal_label=fiscal_label), unsafe_allow_html=True)
 
 
 def render_quick_filter_bar(df_cases: pd.DataFrame, bundle: dict):
@@ -1163,7 +1178,7 @@ def main():
     df_cases, df_causes = apply_filters(bundle)
     
     # 3. Render Header
-    render_header()
+    render_header(bundle['df_cases_all'])
     
     # 4. Render Quick Filter Summary Bar
     render_quick_filter_bar(df_cases, bundle)

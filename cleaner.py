@@ -9,7 +9,7 @@ import re
 import io
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import date, datetime
 
 # ==============================================================================
 # 1. DICTIONARIES & MAPPINGS
@@ -533,9 +533,11 @@ def parse_sheet_month(sheet_name: str) -> tuple[int, int, str]:
         year_ce = year_be - 543
         year_found = year_ce
     else:
-        # Default current fiscal year
-        year_ce = 2026
-        year_be = 2569
+        # If a sheet omits the year, infer the current Thai fiscal-year start.
+        # This keeps year-less monthly tabs usable after the fiscal year rolls over.
+        today = date.today()
+        year_ce = today.year if today.month >= 10 else today.year - 1
+        year_be = year_ce + 543
 
     if month_found:
         label = f"{THAI_MONTH_NAMES_SHORT[month_found]} {year_be}"
