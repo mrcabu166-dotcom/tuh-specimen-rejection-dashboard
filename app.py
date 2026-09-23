@@ -8,6 +8,7 @@ Built with Streamlit & Plotly.
 
 import os
 import io
+import re
 import base64
 import pandas as pd
 import numpy as np
@@ -615,8 +616,25 @@ def render_sidebar():
             st.stop()
             
         st.markdown("<div style='font-size: 0.84rem; font-weight: 600; color: #334155; margin-bottom: 0.5rem;'>🔎 ตัวกรองข้อมูล (Filters)</div>", unsafe_allow_html=True)
+
+        # 1. Fiscal Year Filter
+        def fiscal_sort_key(label: str):
+            match = re.search(r'(\d{4})$', str(label))
+            return int(match.group(1)) if match else 0
+
+        all_fiscal_years = sorted(
+            df_cases_all['fiscal_year'].dropna().unique().tolist(),
+            key=fiscal_sort_key
+        )
+        selected_fiscal_years = render_popover_multiselect(
+            label="ปีงบประมาณ",
+            icon="🗓️",
+            all_options=all_fiscal_years,
+            state_key="sel_fiscal_years",
+            unit="ปี"
+        )
         
-        # 1. Month Filter
+        # 2. Month Filter
         all_months_ym = sorted(df_cases_all['year_month'].unique().tolist())
         ym_to_th = dict(zip(df_cases_all['year_month'], df_cases_all['thai_month_year']))
         th_to_ym = {v: k for k, v in ym_to_th.items()}
@@ -631,7 +649,7 @@ def render_sidebar():
         )
         selected_ym = [th_to_ym[m] for m in selected_months_th if m in th_to_ym]
         
-        # 2. Ward Group Filter
+        # 3. Ward Group Filter
         all_ward_groups = sorted(df_cases_all['ward_group'].dropna().unique().tolist())
         selected_groups = render_popover_multiselect(
             label="กลุ่มหอผู้ป่วย",
@@ -641,7 +659,7 @@ def render_sidebar():
             unit="กลุ่ม"
         )
         
-        # 3. Ward Filter (cascaded by selected Ward Groups)
+        # 4. Ward Filter (cascaded by selected Ward Groups)
         cascaded_wards = sorted(
             df_cases_all[df_cases_all['ward_group'].isin(selected_groups)]['ward_standard'].unique().tolist()
         )
@@ -653,7 +671,7 @@ def render_sidebar():
             unit="Ward"
         )
         
-        # 4. Rejection Category Filter
+        # 5. Rejection Category Filter
         all_categories = sorted(df_causes_all['category'].dropna().unique().tolist())
         selected_categories = render_popover_multiselect(
             label="กลุ่มสาเหตุ",
@@ -663,7 +681,7 @@ def render_sidebar():
             unit="กลุ่ม"
         )
         
-        # 5. Root Cause Filter (cascaded by selected Categories)
+        # 6. Root Cause Filter (cascaded by selected Categories)
         cascaded_causes = sorted(
             df_causes_all[df_causes_all['category'].isin(selected_categories)]['reason'].unique().tolist()
         )
@@ -675,7 +693,7 @@ def render_sidebar():
             unit="สาเหตุ"
         )
         
-        # 6. Specimen Type Filter
+        # 7. Specimen Type Filter
         all_specimens = sorted(df_cases_all['specimen_type'].dropna().unique().tolist())
         selected_specimens = render_popover_multiselect(
             label="สิ่งส่งตรวจ",
@@ -685,7 +703,7 @@ def render_sidebar():
             unit="ชนิด"
         )
         
-        # 7. Risk Level Filter
+        # 8. Risk Level Filter
         all_risks = sorted(df_cases_all['risk_level'].dropna().unique().tolist())
         selected_risks = render_popover_multiselect(
             label="ความเสี่ยง",
@@ -695,7 +713,7 @@ def render_sidebar():
             unit="ระดับ"
         )
         
-        # 8. Resolution Status Filter
+        # 9. Resolution Status Filter
         all_resolutions = sorted(df_cases_all['resolution'].dropna().unique().tolist())
         selected_resolutions = render_popover_multiselect(
             label="การแก้ไข",
@@ -709,6 +727,7 @@ def render_sidebar():
         
         # Calculate Active Filters Count
         active_count = 0
+        if len(selected_fiscal_years) < len(all_fiscal_years): active_count += 1
         if len(selected_months_th) < len(all_months_th): active_count += 1
         if len(selected_groups) < len(all_ward_groups): active_count += 1
         if len(selected_wards) < len(cascaded_wards): active_count += 1
@@ -728,6 +747,7 @@ def render_sidebar():
         with col_act2:
             if st.button("🔄 Reset Filters", width="stretch"):
                 # Reset all session state filter sets to all
+                st.session_state["sel_fiscal_years"] = set(all_fiscal_years)
                 st.session_state["sel_months"] = set(all_months_th)
                 st.session_state["sel_groups"] = set(all_ward_groups)
                 st.session_state["sel_wards"] = set(cascaded_wards)
@@ -745,6 +765,7 @@ def render_sidebar():
     filter_bundle = {
         'df_cases_all': df_cases_all,
         'df_causes_all': df_causes_all,
+        'selected_fiscal_years': selected_fiscal_years,
         'selected_ym': selected_ym,
         'selected_months_th': selected_months_th,
         'selected_groups': selected_groups,
@@ -772,6 +793,7 @@ def apply_filters(bundle: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     # Cause-level filter
     cause_mask = (
+        df_causes_all['fiscal_year'].isin(bundle['selected_fiscal_years']) &
         df_causes_all['year_month'].isin(bundle['selected_ym']) &
         df_causes_all['ward_group'].isin(bundle['selected_groups']) &
         df_causes_all['ward_standard'].isin(bundle['selected_wards']) &

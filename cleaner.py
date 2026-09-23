@@ -647,6 +647,7 @@ def process_dataframe_rows(df: pd.DataFrame, default_month: int = None, default_
     year_months = []
     thai_labels = []
     fiscal_quarters = []
+    fiscal_year_labels = []
 
     for idx, row in df.iterrows():
         raw_d = row['day']
@@ -689,15 +690,19 @@ def process_dataframe_rows(df: pd.DataFrame, default_month: int = None, default_
         else:
             q_str = f"Q4/{be_y}"
 
+        fiscal_year = be_y + 1 if cur_m >= 10 else be_y
+
         dates.append(date_iso)
         year_months.append(ym_str)
         thai_labels.append(th_label)
         fiscal_quarters.append(q_str)
+        fiscal_year_labels.append(f"ปีงบประมาณ {fiscal_year}")
 
     df['date'] = dates
     df['year_month'] = year_months
     df['thai_month_year'] = thai_labels
     df['fiscal_quarter'] = fiscal_quarters
+    df['fiscal_year'] = fiscal_year_labels
 
     # Clean status, followup, and resolution
     df['status'] = df['status'].replace({'': 'รอตรวจสอบ'})
@@ -872,6 +877,7 @@ def unpivot_causes(df_cases: pd.DataFrame) -> pd.DataFrame:
             'year_month': row['year_month'],
             'thai_month_year': row['thai_month_year'],
             'fiscal_quarter': row['fiscal_quarter'],
+            'fiscal_year': row['fiscal_year'],
             'hn': row['hn'],
             'ward_raw': row['ward_raw'],
             'ward_standard': row['ward_standard'],
