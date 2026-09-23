@@ -454,6 +454,7 @@ DEFAULT_EXCEL_PATHS = [
 ]
 GOOGLE_SHEET_ID = "1J16UXkoO5jW6X5jfiQ2lYTna3V2aJGZm"
 GOOGLE_SHEET_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
+DEFAULT_MONTHLY_QUALITY_TARGET = 30
 
 @st.cache_data(show_spinner="กำลังซิงก์และประมวลผลข้อมูล...", ttl=900)
 def load_data(file_source, cache_version="merged-headers-20260923"):
@@ -1298,6 +1299,125 @@ def render_fiscal_year_comparison(df_cases: pd.DataFrame):
     st.plotly_chart(fig, width="stretch")
 
 
+def _quality_status(count: int, target: int) -> tuple[str, str, str]:
+    """Return Thai status text plus foreground/background colors."""
+    warning_limit = max(target + 1, int(round(target * 1.5)))
+    if count <= target:
+        return "ผ่านเป้าหมาย", "#166534", "#DCFCE7"
+    if count <= warning_limit:
+        return "เฝ้าระวัง", "#92400E", "#FEF3C7"
+    return "เกินเป้าหมาย", "#991B1B", "#FEE2E2"
+
+
+def render_quality_target(df_cases: pd.DataFrame):
+    """Show monthly quality target with green/yellow/red status by month."""
+    st.markdown("""
+    <div class="chart-card">
+        <div class="chart-title">🎯 เป้าหมายคุณภาพรายเดือน</div>
+        <div style="font-size: 0.82rem; color: #64748B; margin-bottom: 0.8rem;">
+            สีเขียว = ไม่เกินเป้าหมาย · สีเหลือง = เฝ้าระวัง · สีแดง = สูงกว่าเกณฑ์เตือน
+        </div>
+    """, unsafe_allow_html=True)
+    target = st.number_input(
+        "เป้าหมายเคสปฏิเสธต่อเดือน (เคส)",
+        min_value=1,
+        max_value=1000,
+        value=DEFAULT_MONTHLY_QUALITY_TARGET,
+        step=1,
+        key="quality_target_monthly",
+        help="ค่าเริ่มต้น 30 เคส/เดือน; สีเหลืองเริ่มเมื่อเกินเป้าหมายถึง 1.5 เท่า และสีแดงเมื่อเกินเกณฑ์เตือน",
+    )
+    trend = cleaner.get_monthly_trend(df_cases)
+    if trend.empty:
+        st.info("ไม่มีข้อมูลสำหรับประเมินเป้าหมายรายเดือน")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    latest = trend.iloc[-1]
+    latest_status, latest_fg, latest_bg = _quality_status(int(latest['count']), int(target))
+    warning_limit = max(int(target) + 1, int(round(int(target) * 1.5)))
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;margin-bottom:0.8rem;'>"
+        f"<span style='font-weight:700;color:#334155;'>เดือนล่าสุด: {latest['thai_month_year']} · {int(latest['count']):,} เคส</span>"
+        f"<span style='background:{latest_bg};color:{latest_fg};padding:0.25rem 0.7rem;border-radius:999px;font-weight:700;'>{latest_status}</span>"
+        f"<span style='font-size:0.78rem;color:#64748B;'>เกณฑ์เตือน {warning_limit:,} เคสขึ้นไป</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    rows = []
+    for _, row in trend.iterrows():
+        status, fg, bg = _quality_status(int(row['count']), int(target))
+        rows.append(
+            f"<tr><td>{row['thai_month_year']}</td><td style='text-align:right;font-weight:700;'>{int(row['count']):,}</td>"
+            f"<td><span style='background:{bg};color:{fg};padding:0.2rem 0.55rem;border-radius:999px;font-weight:700;'>{status}</span></td></tr>"
+        )
+    st.markdown(
+        "<table style='width:100%;border-collapse:collapse;font-size:0.84rem;'>"
+        "<thead><tr style='color:#64748B;border-bottom:1px solid #E2E8F0;'>"
+        "<th style='text-align:left;padding:0.35rem;'>เดือน</th><th style='text-align:right;padding:0.35rem;'>เคส</th>"
+        "<th style='text-align:left;padding:0.35rem;'>สถานะ</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_data_quality_check(df_cases: pd.DataFrame, df_causes: pd.DataFrame):
+    """Audit dates, duplicate records, Ward mappings, and cause grouping."""
+    cases = df_cases.copy()
+    causes = df_causes.copy()
+
+    parsed_dates = pd.to_datetime(cases.get('date'), errors='coerce')
+    raw_days = pd.to_numeric(cases.get('day'), errors='coerce')
+    max_days = parsed_dates.dt.days_in_month
+    invalid_date_mask = parsed_dates.isna() | raw_days.isna() | (raw_days < 1) | (raw_days > max_days)
+
+    duplicate_columns = [
+        c for c in ['date', 'time', 'ward_raw', 'specimen_issue', 'request_issue', 'payment_issue', 'it_issue', 'other_issue']
+        if c in cases.columns
+    ]
+    duplicate_mask = cases.duplicated(subset=duplicate_columns, keep=False) if duplicate_columns else pd.Series(False, index=cases.index)
+
+    unmapped = cleaner.get_unmapped_wards(cases)
+    known_categories = set(cleaner.CATEGORY_LABELS.values()) | {'ไม่ระบุสาเหตุชัดเจน'}
+    uncategorized_mask = (~causes['category'].isin(known_categories)) | causes['category'].eq('ไม่ระบุสาเหตุชัดเจน') | causes['reason'].eq('ไม่ระบุสาเหตุ')
+
+    quality_items = [
+        ('📅 วันที่ผิด/ไม่ครบ', int(invalid_date_mask.sum())),
+        ('🧬 ข้อมูลซ้ำ', int(duplicate_mask.sum())),
+        ('🏥 Ward ใหม่/รอเพิ่ม mapping', int(len(unmapped))),
+        ('🧩 สาเหตุยังไม่จัดกลุ่ม', int(uncategorized_mask.sum())),
+    ]
+    cards = []
+    for label, count in quality_items:
+        fg, bg, status = ('#166534', '#DCFCE7', 'ผ่าน') if count == 0 else ('#991B1B', '#FEE2E2', 'ต้องตรวจสอบ')
+        cards.append(
+            f"<div style='border:1px solid #E2E8F0;border-radius:12px;padding:0.75rem;background:#FFFFFF;'>"
+            f"<div style='font-size:0.78rem;color:#64748B;'>{label}</div>"
+            f"<div style='font-size:1.45rem;font-weight:800;color:{fg};'>{count:,}</div>"
+            f"<span style='background:{bg};color:{fg};padding:0.15rem 0.5rem;border-radius:999px;font-size:0.75rem;font-weight:700;'>{status}</span></div>"
+        )
+    st.markdown("<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:0.7rem;margin:0.7rem 0 1rem;'>" + ''.join(cards) + "</div>", unsafe_allow_html=True)
+
+    if invalid_date_mask.any():
+        st.markdown("**📅 รายการวันที่ผิดหรือไม่ครบ**")
+        date_cols = [c for c in ['date', 'day', 'time', 'ward_standard', 'source_sheet'] if c in cases.columns]
+        st.dataframe(cases.loc[invalid_date_mask, date_cols].head(100), width="stretch", hide_index=True)
+    if duplicate_mask.any():
+        st.markdown("**🧬 รายการที่อาจซ้ำกัน**")
+        dup_cols = [c for c in ['date', 'time', 'ward_standard', 'specimen_issue', 'request_issue', 'other_issue'] if c in cases.columns]
+        st.dataframe(cases.loc[duplicate_mask, dup_cols].head(100), width="stretch", hide_index=True)
+    if not unmapped.empty:
+        st.markdown("**🏥 Ward ที่ควรตรวจและเพิ่มใน mapping**")
+        st.dataframe(unmapped, width="stretch", hide_index=True)
+    if uncategorized_mask.any():
+        st.markdown("**🧩 สาเหตุที่ยังไม่ถูกจัดกลุ่ม**")
+        cause_cols = [c for c in ['date', 'ward_standard', 'category', 'reason', 'notes'] if c in causes.columns]
+        st.dataframe(causes.loc[uncategorized_mask, cause_cols].head(100), width="stretch", hide_index=True)
+    if not any(count > 0 for _, count in quality_items):
+        st.success("✅ ไม่พบรายการที่ต้องแก้ไขจากการตรวจคุณภาพข้อมูลรอบนี้")
+
+
 # ==============================================================================
 # 9. MAIN APPLICATION CONTROLLER
 # ==============================================================================
@@ -1359,8 +1479,10 @@ def main():
         """, unsafe_allow_html=True)
         render_fiscal_year_comparison(df_cases)
         st.markdown("</div>", unsafe_allow_html=True)
+
+        render_quality_target(df_cases)
             
-        # ROW 3: Top 10 Wards (50%) + Top 10 Root Causes (50%)
+        # ROW 4: Top 10 Wards (50%) + Top 10 Root Causes (50%)
         col_w, col_r = st.columns([1, 1])
         with col_w:
             st.markdown("""
@@ -1623,10 +1745,15 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     # --------------------------------------------------------------------------
-    # TAB 5: ตรวจสอบชื่อหอผู้ป่วย
+    # TAB 5: ตรวจสอบคุณภาพข้อมูล
     # --------------------------------------------------------------------------
     with tab5:
-        st.markdown("<div class='chart-card'><div class='chart-title'>🩺 ตรวจสอบความถูกต้องของชื่อหอผู้ป่วย (Ward Mapping Audit)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='chart-card'><div class='chart-title'>🩺 Data Quality Check · ตรวจสอบคุณภาพข้อมูล</div>", unsafe_allow_html=True)
+        st.caption("ตรวจชื่อ Ward ใหม่ วันที่ผิด ข้อมูลซ้ำ และสาเหตุที่ยังไม่ได้จัดกลุ่มจากข้อมูลทั้งหมดที่เชื่อมอยู่")
+        render_data_quality_check(bundle['df_cases_all'], bundle['df_causes_all'])
+
+        st.markdown("<hr style='margin:1.2rem 0;border:none;border-top:1px solid #E2E8F0;'>", unsafe_allow_html=True)
+        st.markdown("**🩺 ตรวจสอบความถูกต้องของชื่อหอผู้ป่วย (Ward Mapping Audit)**")
         unmapped = cleaner.get_unmapped_wards(bundle['df_cases_all'])
         
         m1, m2, m3 = st.columns(3)
