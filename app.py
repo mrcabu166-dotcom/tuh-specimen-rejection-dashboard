@@ -456,7 +456,7 @@ GOOGLE_SHEET_ID = "1J16UXkoO5jW6X5jfiQ2lYTna3V2aJGZm"
 GOOGLE_SHEET_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
 
 @st.cache_data(show_spinner="กำลังซิงก์และประมวลผลข้อมูล...", ttl=900)
-def load_data(file_source):
+def load_data(file_source, cache_version="merged-headers-20260923"):
     source_for_cleaner = file_source
     if isinstance(file_source, str) and file_source.startswith(('http://', 'https://')):
         response = requests.get(file_source, timeout=45)
