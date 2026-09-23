@@ -453,7 +453,26 @@ DEFAULT_EXCEL_PATHS = [
 
 @st.cache_data(show_spinner="กำลังประมวลผลและคลีนข้อมูล...", ttl=3600)
 def load_data(file_source):
-    return cleaner.load_and_consolidate(file_source)
+    df_cases, df_causes = cleaner.load_and_consolidate(file_source)
+
+    # Backward-compatible fallback for cached/older cleaned data that predates
+    # the fiscal_year column. Derive it from the normalized ISO date.
+    def ensure_fiscal_year(df):
+        if 'fiscal_year' in df.columns or 'date' not in df.columns:
+            return df
+        result = df.copy()
+        parsed_dates = pd.to_datetime(result['date'], errors='coerce')
+        labels = []
+        for dt in parsed_dates:
+            if pd.isna(dt):
+                labels.append('ปีงบประมาณ -')
+            else:
+                fy = int(dt.year + (1 if dt.month >= 10 else 0) + 543)
+                labels.append(f'ปีงบประมาณ {fy}')
+        result['fiscal_year'] = labels
+        return result
+
+    return ensure_fiscal_year(df_cases), ensure_fiscal_year(df_causes)
 
 
 # ==============================================================================
