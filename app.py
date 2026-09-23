@@ -10,11 +10,13 @@ import os
 import io
 import re
 import base64
+import requests
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 import cleaner
 
@@ -450,10 +452,19 @@ DEFAULT_EXCEL_PATHS = [
     r"C:\Users\kanokwan\Downloads\แบบบันทึกการปฏิเสธสิ่งส่งตรวจ.xlsx",
     r"C:\Users\kanokwan\Downloads\สำเนาของ แบบบันทึกการปฏิเสธสิ่งส่งตรวจ (Google Sheets) - สรุป.csv",
 ]
+GOOGLE_SHEET_ID = "1J16UXkoO5jW6X5jfiQ2lYTna3V2aJGZm"
+GOOGLE_SHEET_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
 
-@st.cache_data(show_spinner="กำลังประมวลผลและคลีนข้อมูล...", ttl=3600)
+@st.cache_data(show_spinner="กำลังซิงก์และประมวลผลข้อมูล...", ttl=900)
 def load_data(file_source):
-    df_cases, df_causes = cleaner.load_and_consolidate(file_source)
+    source_for_cleaner = file_source
+    if isinstance(file_source, str) and file_source.startswith(('http://', 'https://')):
+        response = requests.get(file_source, timeout=45)
+        response.raise_for_status()
+        source_for_cleaner = io.BytesIO(response.content)
+        source_for_cleaner.name = "google_sheet_export.xlsx"
+
+    df_cases, df_causes = cleaner.load_and_consolidate(source_for_cleaner)
 
     # Backward-compatible fallback for cached/older cleaned data that predates
     # the fiscal_year column. Derive it from the normalized ISO date.
@@ -472,7 +483,22 @@ def load_data(file_source):
         result['fiscal_year'] = labels
         return result
 
-    return ensure_fiscal_year(df_cases), ensure_fiscal_year(df_causes)
+    def mask_public_identifiers(df):
+        result = df.copy()
+        masks = {
+            'hn': 'HN-ปิดบัง',
+            'receiver': 'ปิดบัง',
+            'reporter': 'ปิดบัง',
+            'follower': 'ปิดบัง',
+            'supervisor': 'ปิดบัง',
+        }
+        for col, replacement in masks.items():
+            if col in result.columns:
+                values = result[col].astype(str).str.strip()
+                result[col] = values.where(values.isin(['', 'nan', 'None']), replacement)
+        return result
+
+    return mask_public_identifiers(ensure_fiscal_year(df_cases)), mask_public_identifiers(ensure_fiscal_year(df_causes))
 
 
 # ==============================================================================
@@ -605,34 +631,53 @@ def render_sidebar():
             
         active_source = None
         source_label = ""
+        google_sync_error = None
         
         if uploaded_file is not None:
             active_source = uploaded_file
             source_label = uploaded_file.name
         else:
-            for p in DEFAULT_EXCEL_PATHS:
-                if os.path.exists(p):
-                    active_source = p
-                    source_label = os.path.basename(p)
-                    break
+            active_source = GOOGLE_SHEET_XLSX_URL
+            source_label = "Google Sheets (ซิงก์อัตโนมัติ)"
                     
         if active_source is None:
             st.error("⚠️ ไม่พบไฟล์ข้อมูล กรุณาอัปโหลดไฟล์ Excel/CSV")
             st.stop()
             
-        st.caption(f"📄 ใช้ข้อมูล: `{source_label}`")
         st.markdown("<hr style='margin: 0.6rem 0 0.8rem 0; border: none; border-top: 1px solid #E2E8F0;'/>", unsafe_allow_html=True)
         
         # Load raw data
         try:
             df_cases_all, df_causes_all = load_data(active_source)
         except Exception as e:
-            st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์: {e}")
-            st.stop()
+            google_sync_error = e if active_source == GOOGLE_SHEET_XLSX_URL else None
+            active_source = None
+            for p in DEFAULT_EXCEL_PATHS:
+                if os.path.exists(p):
+                    try:
+                        df_cases_all, df_causes_all = load_data(p)
+                        source_label = f"ไฟล์สำรอง: {os.path.basename(p)}"
+                        break
+                    except Exception:
+                        continue
+            else:
+                st.error(f"เกิดข้อผิดพลาดในการอ่านข้อมูล: {e}")
+                st.stop()
+
+        st.caption(f"📄 ใช้ข้อมูล: `{source_label}`")
+        if active_source == GOOGLE_SHEET_XLSX_URL:
+            st.caption("🔄 ซิงก์จาก Google Sheets อัตโนมัติทุก 15 นาที")
+        elif google_sync_error is not None:
+            st.warning("เชื่อม Google Sheets ไม่สำเร็จ จึงใช้ไฟล์สำรองในแอปชั่วคราว — ตรวจสิทธิ์แชร์ชีตเป็น Viewer สำหรับผู้ที่มีลิงก์")
             
         if df_cases_all.empty:
             st.warning("⚠️ ไม่มีข้อมูลในไฟล์")
             st.stop()
+
+        parsed_latest = pd.to_datetime(df_cases_all.get('date'), errors='coerce').dropna()
+        if not parsed_latest.empty:
+            latest_dt = parsed_latest.max()
+            st.caption(f"🕒 ข้อมูลล่าสุดในตาราง: {latest_dt.day:02d}/{latest_dt.month:02d}/{latest_dt.year + 543}")
             
         st.markdown("<div style='font-size: 0.84rem; font-weight: 600; color: #334155; margin-bottom: 0.5rem;'>🔎 ตัวกรองข้อมูล (Filters)</div>", unsafe_allow_html=True)
 
@@ -1207,6 +1252,52 @@ def render_top_root_causes_chart(df_causes: pd.DataFrame):
     st.plotly_chart(fig, width="stretch")
 
 
+def render_fiscal_year_comparison(df_cases: pd.DataFrame):
+    """Render a year-over-year comparison that expands automatically as new FY data arrives."""
+    if 'fiscal_year' not in df_cases.columns or df_cases.empty:
+        st.info("ยังไม่มีข้อมูลสำหรับเปรียบเทียบปีงบประมาณ")
+        return
+
+    df_fy = (
+        df_cases.dropna(subset=['fiscal_year'])
+        .groupby('fiscal_year', as_index=False)
+        .size()
+        .rename(columns={'size': 'count'})
+    )
+    if df_fy.empty:
+        st.info("ยังไม่มีข้อมูลสำหรับเปรียบเทียบปีงบประมาณ")
+        return
+
+    # Keep the fiscal-year labels in chronological order while displaying the
+    # Thai label used by the filters and header.
+    df_fy['fy_order'] = df_fy['fiscal_year'].astype(str).str.extract(r'(\d+)')[0].astype(float)
+    df_fy = df_fy.sort_values(['fy_order', 'fiscal_year'])
+    fig = px.bar(
+        df_fy,
+        x='fiscal_year',
+        y='count',
+        text='count',
+        color_discrete_sequence=['#df6a6a'],
+    )
+    fig.update_traces(
+        textposition='outside',
+        textfont=dict(size=12, color='#1E293B'),
+        marker=dict(cornerradius=6),
+        hovertemplate="<b>%{x}</b><br>จำนวนเคสปฏิเสธ: <b>%{y:,} เคส</b><extra></extra>",
+    )
+    fig.update_layout(
+        height=300,
+        margin=dict(l=10, r=20, t=10, b=10),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(title='', showgrid=False, tickfont=dict(size=11, color='#475569')),
+        yaxis=dict(title='จำนวนเคส', showgrid=True, gridcolor='#F1F5F9', tickfont=dict(size=11)),
+        showlegend=False,
+        hoverlabel=dict(bgcolor='#FFFFFF', font_size=12, font_family='Noto Sans Thai'),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
 # ==============================================================================
 # 9. MAIN APPLICATION CONTROLLER
 # ==============================================================================
@@ -1257,8 +1348,19 @@ def main():
             """, unsafe_allow_html=True)
             render_category_donut(df_causes)
             st.markdown("</div>", unsafe_allow_html=True)
+
+        # ROW 2: Fiscal-year comparison
+        st.markdown("""
+        <div class="chart-card">
+            <div class="chart-title">📅 เปรียบเทียบจำนวนเคสตามปีงบประมาณ</div>
+            <div style="font-size: 0.82rem; color: #64748B; margin-bottom: 0.8rem;">
+                ใช้ดูภาพรวมระหว่างปีงบประมาณที่เลือก และจะเพิ่มปีใหม่ให้อัตโนมัติเมื่อมีข้อมูลเข้ามา
+            </div>
+        """, unsafe_allow_html=True)
+        render_fiscal_year_comparison(df_cases)
+        st.markdown("</div>", unsafe_allow_html=True)
             
-        # ROW 2: Top 10 Wards (50%) + Top 10 Root Causes (50%)
+        # ROW 3: Top 10 Wards (50%) + Top 10 Root Causes (50%)
         col_w, col_r = st.columns([1, 1])
         with col_w:
             st.markdown("""
@@ -1280,6 +1382,37 @@ def main():
     # TAB 2: วิเคราะห์สาเหตุเชิงลึก
     # --------------------------------------------------------------------------
     with tab2:
+        st.markdown("""
+        <div class="chart-card">
+            <div class="chart-title">📊 Pareto สาเหตุการปฏิเสธ (80/20)</div>
+            <div style="font-size: 0.82rem; color: #64748B; margin-bottom: 0.8rem;">
+                เรียงสาเหตุจากพบบ่อยที่สุด พร้อมเส้นเปอร์เซ็นต์สะสมเพื่อช่วยจัดลำดับการแก้ไข
+            </div>
+        """, unsafe_allow_html=True)
+        if not df_causes.empty:
+            pareto = (
+                df_causes.groupby('reason').size().reset_index(name='count')
+                .sort_values('count', ascending=False)
+                .head(15)
+            )
+            pareto['cumulative_pct'] = pareto['count'].cumsum() / pareto['count'].sum() * 100
+            fig_pareto = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_pareto.add_trace(
+                go.Bar(x=pareto['reason'], y=pareto['count'], name='จำนวนครั้ง', marker_color='#6c5070'),
+                secondary_y=False,
+            )
+            fig_pareto.add_trace(
+                go.Scatter(x=pareto['reason'], y=pareto['cumulative_pct'], name='% สะสม', mode='lines+markers', line=dict(color='#df6a6a', width=3)),
+                secondary_y=True,
+            )
+            fig_pareto.update_yaxes(title_text='จำนวนครั้ง', secondary_y=False, gridcolor='#F1F5F9')
+            fig_pareto.update_yaxes(title_text='เปอร์เซ็นต์สะสม', range=[0, 105], secondary_y=True, ticksuffix='%')
+            fig_pareto.update_layout(height=390, margin=dict(l=20, r=20, t=20, b=110), plot_bgcolor='rgba(0,0,0,0)', font=dict(family='Noto Sans Thai', size=11), xaxis=dict(tickangle=-35, title=''))
+            st.plotly_chart(fig_pareto, width="stretch")
+        else:
+            st.info("ไม่มีข้อมูลสำหรับสร้าง Pareto")
+        st.markdown("</div>", unsafe_allow_html=True)
+
         st.markdown("""
         <div class="chart-card">
             <div class="chart-title">🧩 ความสัมพันธ์ระหว่าง หอผู้ป่วย (Ward) x กลุ่มสาเหตุการปฏิเสธ (Heatmap Matrix)</div>

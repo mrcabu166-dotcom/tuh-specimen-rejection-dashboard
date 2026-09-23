@@ -606,6 +606,22 @@ def process_dataframe_rows(df: pd.DataFrame, default_month: int = None, default_
             col_map[c] = 'supervisor'
 
     df = df.rename(columns=col_map)
+
+    # Some monthly sheets contain the same header twice (for example two
+    # "สถานะ" columns). Pandas then returns a DataFrame for ``df[col]`` and
+    # string operations fail. Coalesce duplicate columns by keeping the first
+    # non-empty value in each row before the required-column checks below.
+    if df.columns.duplicated().any():
+        merged_columns = {}
+        for position, column_name in enumerate(df.columns):
+            series = df.iloc[:, position]
+            if column_name not in merged_columns:
+                merged_columns[column_name] = series.copy()
+                continue
+            existing = merged_columns[column_name]
+            empty = existing.isna() | existing.astype(str).str.strip().isin(['', 'nan', 'None'])
+            merged_columns[column_name] = existing.where(~empty, series)
+        df = pd.DataFrame(merged_columns, index=df.index)
     
     # Ensure mandatory columns exist
     for req_col in ['day', 'time', 'hn', 'ward_raw', 'specimen_issue', 'request_issue',
