@@ -1302,8 +1302,7 @@ def render_fiscal_year_comparison(df_cases: pd.DataFrame):
     df_fy = (
         df_cases.dropna(subset=['fiscal_year'])
         .groupby('fiscal_year', as_index=False)
-        .size()
-        .rename(columns={'size': 'count'})
+        .agg(count=('case_id', 'size'), months=('year_month', 'nunique'))
     )
     if df_fy.empty:
         st.info("ยังไม่มีข้อมูลสำหรับเปรียบเทียบปีงบประมาณ")
@@ -1313,18 +1312,24 @@ def render_fiscal_year_comparison(df_cases: pd.DataFrame):
     # Thai label used by the filters and header.
     df_fy['fy_order'] = df_fy['fiscal_year'].astype(str).str.extract(r'(\d+)')[0].astype(float)
     df_fy = df_fy.sort_values(['fy_order', 'fiscal_year'])
+    coverage_text = ' · '.join(
+        f"{row['fiscal_year']}: {int(row['months'])}/12 เดือน"
+        for _, row in df_fy.iterrows()
+    )
+    st.caption(f"จำนวนเดือนที่มีข้อมูล — {coverage_text} (ใช้ประกอบการเทียบยอดรวม)")
     fig = px.bar(
         df_fy,
         x='fiscal_year',
         y='count',
         text='count',
+        custom_data=['months'],
         color_discrete_sequence=['#df6a6a'],
     )
     fig.update_traces(
         textposition='outside',
         textfont=dict(size=12, color='#1E293B'),
         marker=dict(cornerradius=6),
-        hovertemplate="<b>%{x}</b><br>จำนวนเคสปฏิเสธ: <b>%{y:,} เคส</b><extra></extra>",
+        hovertemplate="<b>%{x}</b><br>จำนวนเคสปฏิเสธ: <b>%{y:,} เคส</b><br>เดือนที่มีข้อมูล: %{customdata[0]}/12<extra></extra>",
     )
     fig.update_layout(
         height=300,
