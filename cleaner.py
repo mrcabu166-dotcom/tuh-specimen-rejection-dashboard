@@ -553,9 +553,40 @@ def find_header_row(df_raw: pd.DataFrame) -> int:
     for idx in range(min(35, len(df_raw))):
         row_vals = [str(x).strip() for x in df_raw.iloc[idx].values if pd.notna(x)]
         row_text = " ".join(row_vals)
-        if ('วันที่' in row_text or 'Day' in row_text) and ('Ward' in row_text or 'หอผู้ป่วย' in row_text or 'สิ่งส่งตรวจ' in row_text):
+        # Require the date/time/HN header group so the document title (which
+        # also contains the words "สิ่งส่งตรวจ") is not mistaken for a header.
+        if (('วันที่' in row_text or 'Day' in row_text)
+                and ('เวลา' in row_text or 'Time' in row_text or 'HN' in row_text)
+                and ('Ward' in row_text or 'หอผู้ป่วย' in row_text or 'สภาพปัญหา' in row_text or 'สิ่งส่งตรวจ' in row_text)):
             return idx
     return 0
+
+
+def read_excel_sheet_data(xl: pd.ExcelFile, sheet_name: str) -> tuple[pd.DataFrame, int]:
+    """Read a sheet while supporting the two-row merged headers in monthly tabs."""
+    df_raw = xl.parse(sheet_name, header=None)
+    h_idx = find_header_row(df_raw)
+    header_values = [str(value).strip() if pd.notna(value) else '' for value in df_raw.iloc[h_idx].tolist()]
+
+    # Monthly tabs place Ward and the five issue groups on the row below the
+    # date/time/HN row. Overlay that row onto the first header row before
+    # reading data, which keeps the correct column positions after merges.
+    if h_idx + 1 < len(df_raw):
+        second_values = [str(value).strip() if pd.notna(value) else '' for value in df_raw.iloc[h_idx + 1].tolist()]
+        second_text = ' '.join(second_values)
+        if 'Ward' in second_text and ('สิ่งส่งตรวจ' in second_text or 'ใบส่งตรวจ' in second_text):
+            header_values = [lower or upper for upper, lower in zip(header_values, second_values)]
+            df_data = xl.parse(sheet_name, skiprows=h_idx + 2, header=None)
+            # Keep a stable name for blank/extra columns; process_dataframe_rows
+            # only maps the semantic headers above.
+            if len(header_values) < len(df_data.columns):
+                header_values.extend([''] * (len(df_data.columns) - len(header_values)))
+            df_data.columns = header_values[:len(df_data.columns)]
+            return df_data, h_idx
+
+    df_data = xl.parse(sheet_name, skiprows=h_idx)
+    df_data.columns = [str(c).strip() for c in df_data.columns]
+    return df_data, h_idx
 
 
 # ==============================================================================
@@ -810,21 +841,14 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
         if monthly_sheets:
             # Read from every monthly sheet
             for s_name, m_num, y_num, m_lbl in monthly_sheets:
-                df_raw = xl.parse(s_name, header=None)
-                h_idx = find_header_row(df_raw)
-                df_data = xl.parse(s_name, skiprows=h_idx)
-                # Clean headers
-                df_data.columns = [str(c).strip() for c in df_data.columns]
+                df_data, h_idx = read_excel_sheet_data(xl, s_name)
                 processed_df = process_dataframe_rows(df_data, default_month=m_num, default_year=y_num, default_label=m_lbl)
                 processed_df['source_sheet'] = s_name
                 all_dfs.append(processed_df)
         else:
             # Read from default/first sheet (e.g. 'สรุป')
             target_sheet = 'สรุป' if 'สรุป' in all_sheet_names else all_sheet_names[0]
-            df_raw = xl.parse(target_sheet, header=None)
-            h_idx = find_header_row(df_raw)
-            df_data = xl.parse(target_sheet, skiprows=h_idx)
-            df_data.columns = [str(c).strip() for c in df_data.columns]
+            df_data, h_idx = read_excel_sheet_data(xl, target_sheet)
             processed_df = process_dataframe_rows(df_data)
             processed_df['source_sheet'] = target_sheet
             all_dfs.append(processed_df)
