@@ -458,7 +458,7 @@ GOOGLE_SHEET_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_I
 DEFAULT_MONTHLY_QUALITY_TARGET = 30
 
 @st.cache_data(show_spinner="กำลังซิงก์และประมวลผลข้อมูล...", ttl=900)
-def load_data(file_source, cache_version="audit-fixes-20260923"):
+def load_data(file_source, cache_version="monthly-tabs-20260924"):
     source_for_cleaner = file_source
     if isinstance(file_source, str) and file_source.startswith(('http://', 'https://')):
         response = requests.get(file_source, timeout=45)
@@ -529,7 +529,11 @@ def load_data(file_source, cache_version="audit-fixes-20260923"):
                 )
         return result
 
-    return mask_public_identifiers(ensure_fiscal_year(df_cases)), mask_public_identifiers(ensure_fiscal_year(df_causes))
+    ingestion_warnings = df_cases.attrs.get('ingestion_warnings', [])
+    public_cases = mask_public_identifiers(ensure_fiscal_year(df_cases))
+    public_causes = mask_public_identifiers(ensure_fiscal_year(df_causes))
+    public_cases.attrs['ingestion_warnings'] = ingestion_warnings
+    return public_cases, public_causes
 
 
 # ==============================================================================
@@ -708,8 +712,12 @@ def render_sidebar():
         st.caption(f"📄 ใช้ข้อมูล: `{source_label}`")
         if active_source == GOOGLE_SHEET_XLSX_URL:
             st.caption("🔄 ซิงก์จาก Google Sheets อัตโนมัติทุก 15 นาที")
+            st.caption("เพิ่มชีทเดือนใหม่ได้เลย เช่น ต.ค. 69 หรือ ม.ค. 70")
         elif google_sync_error is not None:
             st.warning("เชื่อม Google Sheets ไม่สำเร็จ จึงใช้ไฟล์สำรองในแอปชั่วคราว — ตรวจสิทธิ์แชร์ชีตเป็น Viewer สำหรับผู้ที่มีลิงก์")
+
+        for warning in df_cases_all.attrs.get('ingestion_warnings', []):
+            st.warning(warning)
             
         if df_cases_all.empty:
             st.warning("⚠️ ไม่มีข้อมูลในไฟล์")

@@ -9,7 +9,6 @@ import re
 import io
 import pandas as pd
 import numpy as np
-from datetime import date, datetime
 
 # ==============================================================================
 # 1. DICTIONARIES & MAPPINGS
@@ -35,6 +34,11 @@ THAI_MONTH_NAMES_SHORT = [
     '', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
     'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
 ]
+
+MONTH_SHEET_PATTERN = re.compile(
+    r"^\s*(?P<month>" + "|".join(re.escape(name) for name in sorted(THAI_MONTHS, key=len, reverse=True))
+    + r")\s*(?P<year>[0-9๐-๙]{2}|[0-9๐-๙]{4})\s*$"
+)
 
 # Standard Hospital Ward Mapping
 # Maps raw ward names, abbreviations, typos, and variations to official hospital ward names
@@ -506,47 +510,32 @@ def standardize_ward(ward_raw: str) -> tuple[str, str]:
     return cleaned, 'อื่น ๆ'
 
 
-def parse_sheet_month(sheet_name: str) -> tuple[int, int, str]:
+def parse_sheet_month(sheet_name: str) -> tuple[int | None, int | None, str | None]:
     """
     Parse month and year from sheet name (e.g. 'ต.ค. 68', 'ม.ค.69').
     Returns (month, year_ce, label_thai)
     e.g. ('ต.ค. 68') -> (10, 2025, 'ต.ค. 2568')
     """
-    sheet_clean = sheet_name.strip()
-    
-    month_found = None
-    for th_m, m_num in THAI_MONTHS.items():
-        if th_m in sheet_clean:
-            month_found = m_num
-            break
-            
-    year_found = None
-    y_match = re.search(r'(\d{2,4})', sheet_clean)
-    if y_match:
-        y_int = int(y_match.group(1))
-        if y_int < 100: # Two-digit BE year (e.g. 68, 69)
-            year_be = 2500 + y_int
-        elif y_int >= 2500: # Four-digit BE year (e.g. 2568)
-            year_be = y_int
-        else: # CE year (e.g. 2025)
-            year_be = y_int + 543
-        year_ce = year_be - 543
-        year_found = year_ce
+    match = MONTH_SHEET_PATTERN.fullmatch(sheet_name.strip())
+    if match is None:
+        return None, None, None
+
+    month = THAI_MONTHS[match.group('month')]
+    year = int(match.group('year'))
+    if year < 100:  # Two-digit Buddhist year, e.g. 69 -> 2569.
+        year_be = 2500 + year
+    elif 2400 <= year <= 2700:
+        year_be = year
+    elif 1900 <= year <= 2100:
+        year_be = year + 543
     else:
-        # If a sheet omits the year, infer the current Thai fiscal-year start.
-        # This keeps year-less monthly tabs usable after the fiscal year rolls over.
-        today = date.today()
-        year_ce = today.year if today.month >= 10 else today.year - 1
-        year_be = year_ce + 543
+        return None, None, None
 
-    if month_found:
-        label = f"{THAI_MONTH_NAMES_SHORT[month_found]} {year_be}"
-        return month_found, year_ce, label
-    
-    return None, None, None
+    year_ce = year_be - 543
+    return month, year_ce, f"{THAI_MONTH_NAMES_SHORT[month]} {year_be}"
 
 
-def find_header_row(df_raw: pd.DataFrame) -> int:
+def find_header_row(df_raw: pd.DataFrame) -> int | None:
     """
     Search up to top 35 rows to locate header row containing key columns.
     """
@@ -559,13 +548,17 @@ def find_header_row(df_raw: pd.DataFrame) -> int:
                 and ('เวลา' in row_text or 'Time' in row_text or 'HN' in row_text)
                 and ('Ward' in row_text or 'หอผู้ป่วย' in row_text or 'สภาพปัญหา' in row_text or 'สิ่งส่งตรวจ' in row_text)):
             return idx
-    return 0
+    return None
 
 
 def read_excel_sheet_data(xl: pd.ExcelFile, sheet_name: str) -> tuple[pd.DataFrame, int]:
     """Read a sheet while supporting the two-row merged headers in monthly tabs."""
     df_raw = xl.parse(sheet_name, header=None)
+    if df_raw.empty:
+        return pd.DataFrame(), -1
     h_idx = find_header_row(df_raw)
+    if h_idx is None:
+        raise ValueError(f"ชีท '{sheet_name}' ไม่มีหัวตาราง วันที่/เวลา/Ward ที่ระบบอ่านได้")
     header_values = [str(value).strip() if pd.notna(value) else '' for value in df_raw.iloc[h_idx].tolist()]
 
     # Monthly tabs place Ward and the five issue groups on the row below the
@@ -839,23 +832,44 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
         xl = pd.ExcelFile(file_source)
         all_sheet_names = xl.sheet_names
         
-        # Check if there are monthly sheets (e.g. contains 'ต.ค.', 'พ.ย.', etc.)
+        # A new monthly tab is discovered on every reload. Only complete month
+        # and year names are accepted so a yearless tab cannot be misdated.
         monthly_sheets = []
+        ingestion_warnings = []
+        has_month_like_tabs = False
         for s in all_sheet_names:
             if s.strip() in ['สรุป', 'Summary', 'All', 'Sheet1', 'sheet1']:
                 continue
             m, y, lbl = parse_sheet_month(s)
             if m is not None:
+                has_month_like_tabs = True
                 monthly_sheets.append((s, m, y, lbl))
+            elif any(s.strip().startswith(name) for name in THAI_MONTHS):
+                has_month_like_tabs = True
+                ingestion_warnings.append("ข้ามชีทรายเดือนที่ชื่อไม่ครบ: ตั้งชื่อเป็นเดือนและปี เช่น ต.ค. 69")
 
         if monthly_sheets:
-            # Read from every monthly sheet
+            # Sheet order may change when staff copy or drag a new tab.
+            monthly_sheets.sort(key=lambda item: (item[2], item[1], item[0]))
+            seen_months = set()
             for s_name, m_num, y_num, m_lbl in monthly_sheets:
-                df_data, h_idx = read_excel_sheet_data(xl, s_name)
+                month_key = (y_num, m_num)
+                if month_key in seen_months:
+                    ingestion_warnings.append(f"พบหลายชีทสำหรับ {m_lbl}; ระบบรวมข้อมูลจากทุกชีท โปรดตรวจข้อมูลซ้ำ")
+                seen_months.add(month_key)
+                try:
+                    df_data, h_idx = read_excel_sheet_data(xl, s_name)
+                except ValueError as exc:
+                    ingestion_warnings.append(str(exc))
+                    continue
+                if df_data.empty:
+                    continue
                 processed_df = process_dataframe_rows(df_data, default_month=m_num, default_year=y_num, default_label=m_lbl)
+                if processed_df.empty:
+                    continue
                 processed_df['source_sheet'] = s_name
                 all_dfs.append(processed_df)
-        else:
+        elif not has_month_like_tabs:
             # Read from default/first sheet (e.g. 'สรุป')
             target_sheet = 'สรุป' if 'สรุป' in all_sheet_names else all_sheet_names[0]
             df_data, h_idx = read_excel_sheet_data(xl, target_sheet)
@@ -872,7 +886,7 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
                 file_source.seek(0)
             df_raw = pd.read_csv(file_source, header=None, encoding='cp874')
             
-        h_idx = find_header_row(df_raw)
+        h_idx = find_header_row(df_raw) or 0
         if hasattr(file_source, 'seek'):
             file_source.seek(0)
         try:
@@ -889,13 +903,17 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     # Combine all
     if not all_dfs:
-        return pd.DataFrame(), pd.DataFrame()
+        empty_cases, empty_causes = pd.DataFrame(), pd.DataFrame()
+        empty_cases.attrs['ingestion_warnings'] = ingestion_warnings if is_excel else []
+        return empty_cases, empty_causes
 
     df_cases = pd.concat(all_dfs, ignore_index=True)
     df_cases['case_id'] = [f"REJ-{i+1:04d}" for i in range(len(df_cases))]
 
     # Unpivot causes into Tidy format
     df_causes = unpivot_causes(df_cases)
+
+    df_cases.attrs['ingestion_warnings'] = ingestion_warnings if is_excel else []
 
     return df_cases, df_causes
 
