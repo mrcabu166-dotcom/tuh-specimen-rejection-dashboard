@@ -109,7 +109,7 @@ class MonthlyTabsTest(unittest.TestCase):
         book = load_workbook(result)
         sheet = book['ยอดตรวจทั้งหมด']
         sheet['D1'] = 'LIS'
-        sheet.append(['ก.ค. 69', None, None, 8806])
+        sheet.append(['ก.ค. 69', 2, 'Ward A', 8806])
         result = io.BytesIO()
         book.save(result)
         result.seek(0)

@@ -676,15 +676,29 @@ def _read_denominator_sheets(xl: pd.ExcelFile, sheet_names: list[str]) -> tuple[
             records.append({
                 'year_month': year_month,
                 'thai_month_year': thai_label,
-                'ward_standard': ward_standard,
+                # A LIS column represents a hospital-wide monthly total. It
+                # must not inherit the Ward value from the row where it is
+                # stored, otherwise the denominator becomes Ward-specific.
+                'ward_standard': '' if lis_col is not None else ward_standard,
                 'total_specimens': float(total),
                 'source_sheet': sheet_name,
+                'is_lis_column': lis_col is not None,
             })
     if not records:
         empty = pd.DataFrame(columns=['year_month', 'thai_month_year', 'ward_standard', 'total_specimens', 'source_sheet'])
         empty.attrs['sheet_names'] = found_sheet_names
         return empty, warnings
     denominator = pd.DataFrame(records)
+    if 'is_lis_column' in denominator.columns:
+        # Keep one LIS denominator per month even if a user fills the same
+        # monthly total on more than one existing Ward row.
+        lis_rows = denominator[denominator['is_lis_column']].copy()
+        other_rows = denominator[~denominator['is_lis_column']].copy()
+        if not lis_rows.empty:
+            lis_rows = (lis_rows.sort_values('total_specimens')
+                        .drop_duplicates(['year_month', 'source_sheet'], keep='last'))
+        denominator = pd.concat([other_rows, lis_rows], ignore_index=True)
+        denominator = denominator.drop(columns=['is_lis_column'])
     denominator['total_specimens'] = denominator['total_specimens'].astype(float)
     denominator.attrs['sheet_names'] = found_sheet_names
     return denominator, warnings
