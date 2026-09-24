@@ -1340,7 +1340,17 @@ def load_microbiology_stats(source) -> dict:
 
     if year_sheet:
         raw = xl.parse(year_sheet, header=None)
-        for header_row in range(len(raw)):
+        # Annual tables have a descriptive row followed by a row of fiscal
+        # years. Do not scan arbitrary data rows for year-looking numbers:
+        # specimen totals such as 2611 can otherwise be misread as FY 2611.
+        marker_rows = []
+        for marker_row in range(len(raw) - 1):
+            marker = str(raw.iat[marker_row, 0] or '').strip().lower()
+            if 'รายการสิ่งส่งตรวจ' in marker:
+                marker_rows.append(marker_row)
+
+        for marker_row in marker_rows:
+            header_row = marker_row + 1
             years = []
             for col in range(1, min(raw.shape[1], 20)):
                 number = _microbiology_number(raw.iat[header_row, col])

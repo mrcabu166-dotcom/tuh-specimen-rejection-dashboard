@@ -131,6 +131,23 @@ class MonthlyTabsTest(unittest.TestCase):
         self.assertEqual(fy2569['count'].sum(), 69)
         self.assertEqual(stats['annual'][stats['annual']['fiscal_year_num'] == 2568]['count'].sum(), 330)
 
+    def test_microbiology_annual_parser_does_not_treat_counts_as_fiscal_years(self):
+        book = Workbook()
+        annual = book.active
+        annual.title = 'แยก Culture ปี'
+        annual.append(['รายการสิ่งส่งตรวจ', 'ปีงบประมาณ'])
+        annual.append([None, 2568, 2569])
+        annual.append(['Hemo', 19114, None])
+        annual.append(['Stool', 2611, None])
+        annual.append(['Urine', 8906, None])
+        result = io.BytesIO()
+        book.save(result)
+        result.seek(0)
+
+        stats = load_microbiology_stats(result)
+        self.assertEqual(sorted(stats['annual']['fiscal_year_num'].unique().tolist()), [2568])
+        self.assertNotIn(2611, stats['annual']['fiscal_year_num'].tolist())
+
     def test_repeated_thai_vowel_joins_the_same_ward_in_kpi_and_detail(self):
         book = Workbook()
         sheet = book.active
