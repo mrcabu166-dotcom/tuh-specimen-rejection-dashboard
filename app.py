@@ -559,7 +559,7 @@ def load_data(file_source, cache_version="monthly-tabs-20260924"):
 
 
 @st.cache_data(show_spinner=False, ttl=900)
-def load_microbiology_source(cache_version="culture-stats-20260924"):
+def load_microbiology_source(cache_version="culture-stats-20260924-v2"):
     """Fetch the shared microbiology workbook and normalize its two views."""
     local_fallback = os.path.join(os.path.dirname(__file__), "microbiology_stats_source.xlsx")
     try:
