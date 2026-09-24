@@ -736,7 +736,7 @@ def render_sidebar():
             sheet_count = sync_meta.get('sheet_count', 0)
             sync_denominator = sync_meta.get('denominator_rows', 0)
             sync_denominator_sheet = sync_meta.get('denominator_sheet_found', False)
-            denominator_status = 'พร้อมใช้งาน' if sync_denominator else ('พบแท็บแล้ว รอข้อมูล' if sync_denominator_sheet else 'ยังไม่พบแท็บยอดตรวจทั้งหมด')
+            denominator_status = 'พบข้อมูลแล้ว (ตรวจสอบยอดรวมก่อนใช้)' if sync_denominator else ('พบแท็บแล้ว รอข้อมูล' if sync_denominator_sheet else 'ยังไม่พบแท็บยอดตรวจทั้งหมด')
             st.markdown(
                 f"<div style='background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;padding:0.65rem 0.75rem;margin:0.45rem 0 0.7rem;'>"
                 f"<div style='font-weight:700;color:#166534;'>✅ ซิงก์ Google Sheets สำเร็จ</div>"
