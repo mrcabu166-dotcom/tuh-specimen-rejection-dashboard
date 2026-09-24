@@ -1453,6 +1453,8 @@ def _select_denominator(denominator: pd.DataFrame, selected_ym: list, selected_w
         return None, 'ยังไม่มีตัวหารของเดือนที่เลือก', pd.DataFrame()
     has_ward_rows = selected['ward_standard'].astype(str).str.strip().ne('').any()
     overall = selected[selected['ward_standard'].astype(str).str.strip().eq('')]
+    if not has_ward_rows and len(selected_wards) < len(all_wards):
+        return None, 'แท็บยอดตรวจทั้งหมดไม่มีข้อมูลแยกตาม Ward', pd.DataFrame()
     if has_ward_rows and len(selected_wards) < len(all_wards):
         selected = selected[selected['ward_standard'].isin(selected_wards)]
         if selected.empty:
