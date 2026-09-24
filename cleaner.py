@@ -36,7 +36,7 @@ THAI_MONTH_NAMES_SHORT = [
 ]
 
 DENOMINATOR_SHEET_MARKERS = (
-    'ยอดตรวจทั้งหมด', 'ยอดสิ่งส่งตรวจ', 'จำนวนสิ่งส่งตรวจทั้งหมด',
+    'ยอดตรวจจริง', 'ยอดตรวจทั้งหมด', 'ยอดสิ่งส่งตรวจ', 'จำนวนสิ่งส่งตรวจทั้งหมด',
     'ตัวหาร', 'denominator', 'total specimen', 'total specimens',
     'total sample', 'total samples'
 )
@@ -648,10 +648,21 @@ def _read_denominator_sheets(xl: pd.ExcelFile, sheet_names: list[str]) -> tuple[
         period_col = next((c for c in table.columns if any(token in str(c).lower() for token in ['เดือน', 'month', 'งวด', 'year_month'])), None)
         total_col = next((c for c in table.columns if any(token in str(c).lower() for token in ['จำนวนสิ่งส่งตรวจทั้งหมด', 'ยอดตรวจ', 'ตัวหาร', 'total specimen', 'total sample', 'จำนวนทั้งหมด'])), None)
         ward_col = next((c for c in table.columns if 'ward' in str(c).lower() or 'หอผู้ป่วย' in str(c).lower()), None)
+        source_col = next((c for c in table.columns if 'แหล่งข้อมูล' in str(c).lower() or 'data source' in str(c).lower()), None)
         if period_col is None or total_col is None:
             warnings.append(f"ชีทตัวหาร '{sheet_name}' ต้องมีคอลัมน์ เดือน และ จำนวนสิ่งส่งตรวจทั้งหมด")
             continue
+        # The old auto-generated tab counts rejected rows. Accept a dedicated
+        # real-totals tab or rows explicitly marked as LIS data only.
+        dedicated_lis_sheet = 'ยอดตรวจจริง' in name_lower
+        if not dedicated_lis_sheet and source_col is None:
+            warnings.append(f"ชีทตัวหาร '{sheet_name}' ไม่มีคอลัมน์แหล่งข้อมูล; ข้ามยอดที่อาจนับจากเคสปฏิเสธ")
+            continue
         for _, row in table.iterrows():
+            if not dedicated_lis_sheet:
+                source = str(row.get(source_col, '')).strip().lower()
+                if source not in {'lis', 'ระบบห้องปฏิบัติการ', 'laboratory information system'}:
+                    continue
             year_month, thai_label = _parse_period_value(row.get(period_col))
             total = pd.to_numeric(str(row.get(total_col, '')).replace(',', '').strip(), errors='coerce')
             if year_month is None or pd.isna(total) or float(total) <= 0:
@@ -1157,6 +1168,68 @@ def get_kpis(df_cases: pd.DataFrame, df_causes: pd.DataFrame) -> dict:
         'resolution_rate': resolution_rate,
         'incident_count': incident_count
     }
+
+
+def get_rejection_rate_tables(
+    cases: pd.DataFrame,
+    denominator: pd.DataFrame,
+    selected_months: list[str],
+    selected_wards: list[str],
+    all_wards: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Calculate monthly and Ward rates only where real totals are complete.
+
+    The denominator sheet can contain either a hospital total per month, Ward
+    totals, or both. A hospital total is never used for a selected Ward subset.
+    """
+    columns = ['year_month', 'thai_month_year', 'ward_standard', 'rejected',
+               'total_specimens', 'rate_pct', 'status']
+    if cases.empty and (denominator is None or denominator.empty):
+        return pd.DataFrame(columns=columns), pd.DataFrame(columns=columns)
+
+    scoped_cases = cases[
+        cases['year_month'].isin(selected_months)
+        & cases['ward_standard'].isin(selected_wards)
+    ]
+    scoped_den = denominator[denominator['year_month'].isin(selected_months)].copy() if denominator is not None and not denominator.empty else pd.DataFrame(columns=columns)
+    scoped_den['ward_standard'] = scoped_den['ward_standard'].fillna('').astype(str).str.strip()
+    ward_den = scoped_den[scoped_den['ward_standard'].isin(selected_wards) & scoped_den['ward_standard'].ne('')]
+    overall_den = scoped_den[scoped_den['ward_standard'].eq('')]
+    case_counts = scoped_cases.groupby(['year_month', 'ward_standard']).size().to_dict()
+    ward_totals = ward_den.groupby(['year_month', 'ward_standard'])['total_specimens'].sum().to_dict() if not ward_den.empty else {}
+    labels = dict(zip(cases['year_month'], cases['thai_month_year']))
+    labels.update(dict(zip(scoped_den['year_month'], scoped_den['thai_month_year'])))
+
+    def make_row(month, ward, rejected, total, missing=False):
+        if missing or pd.isna(total) or total <= 0:
+            status, rate = 'ไม่มีตัวหาร', None
+        elif rejected > 0 and total <= rejected:
+            status, rate = 'ตัวหารไม่ถูกต้อง', None
+        else:
+            status, rate = 'พร้อมใช้', round(rejected / total * 100, 2)
+        return [month, labels.get(month, month), ward, int(rejected),
+                None if pd.isna(total) else float(total), rate, status]
+
+    ward_keys = set(case_counts) | set(ward_totals)
+    ward_rows = [make_row(month, ward, case_counts.get((month, ward), 0),
+                          ward_totals.get((month, ward), float('nan')))
+                 for month, ward in sorted(ward_keys)]
+    ward_table = pd.DataFrame(ward_rows, columns=columns)
+
+    all_selected = set(selected_wards) == set(all_wards)
+    overall_totals = overall_den.groupby('year_month')['total_specimens'].sum().to_dict() if not overall_den.empty else {}
+    month_rows = []
+    for month in sorted(set(selected_months) & (set(scoped_cases['year_month']) | set(scoped_den['year_month']))):
+        rejected = int(sum(count for (ym, _), count in case_counts.items() if ym == month))
+        if all_selected and month in overall_totals:
+            total, missing = overall_totals[month], False
+        else:
+            month_keys = [(ym, ward) for ym, ward in case_counts if ym == month]
+            missing = any(key not in ward_totals for key in month_keys)
+            totals = [value for (ym, _), value in ward_totals.items() if ym == month]
+            total = sum(totals) if totals else float('nan')
+        month_rows.append(make_row(month, '', rejected, total, missing))
+    return pd.DataFrame(month_rows, columns=columns), ward_table
 
 
 def get_monthly_trend(df_cases: pd.DataFrame) -> pd.DataFrame:

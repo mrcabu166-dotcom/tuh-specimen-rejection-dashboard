@@ -455,7 +455,7 @@ DEFAULT_EXCEL_PATHS = [
     r"C:\Users\kanokwan\Downloads\แบบบันทึกการปฏิเสธสิ่งส่งตรวจ.xlsx",
     r"C:\Users\kanokwan\Downloads\สำเนาของ แบบบันทึกการปฏิเสธสิ่งส่งตรวจ (Google Sheets) - สรุป.csv",
 ]
-GOOGLE_SHEET_ID = "1J16UXkoO5jW6X5jfiQ2lYTna3V2aJGZm"
+GOOGLE_SHEET_ID = "1Ws94jJzPuSznmiMikW3kzuZLgHgyL0licHULhPHfV9I"
 GOOGLE_SHEET_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
 DEFAULT_MONTHLY_QUALITY_TARGET = 30
 
@@ -736,7 +736,7 @@ def render_sidebar():
             sheet_count = sync_meta.get('sheet_count', 0)
             sync_denominator = sync_meta.get('denominator_rows', 0)
             sync_denominator_sheet = sync_meta.get('denominator_sheet_found', False)
-            denominator_status = 'พบข้อมูลแล้ว (ตรวจสอบยอดรวมก่อนใช้)' if sync_denominator else ('พบแท็บแล้ว รอข้อมูล' if sync_denominator_sheet else 'ยังไม่พบแท็บยอดตรวจทั้งหมด')
+            denominator_status = 'พบยอดตรวจจริงจาก LIS' if sync_denominator else ('พบแท็บแล้ว รอยอดตรวจจริงจาก LIS' if sync_denominator_sheet else 'ยังไม่พบแท็บยอดตรวจจริง')
             st.markdown(
                 f"<div style='background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;padding:0.65rem 0.75rem;margin:0.45rem 0 0.7rem;'>"
                 f"<div style='font-weight:700;color:#166534;'>✅ ซิงก์ Google Sheets สำเร็จ</div>"
@@ -1450,28 +1450,6 @@ def render_quality_target(df_cases: pd.DataFrame):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _select_denominator(denominator: pd.DataFrame, selected_ym: list, selected_wards: list, all_wards: list, denominator_sheet_found: bool = False) -> tuple[float | None, str | None, pd.DataFrame]:
-    """Select monthly totals for the current filters without double-counting."""
-    if denominator is None or denominator.empty:
-        return None, ('พบแท็บแล้ว แต่ยังไม่มีข้อมูลตัวหาร' if denominator_sheet_found else 'ยังไม่พบแท็บยอดตรวจทั้งหมด'), pd.DataFrame()
-    selected = denominator[denominator['year_month'].isin(selected_ym)].copy()
-    if selected.empty:
-        return None, 'ยังไม่มีตัวหารของเดือนที่เลือก', pd.DataFrame()
-    has_ward_rows = selected['ward_standard'].astype(str).str.strip().ne('').any()
-    overall = selected[selected['ward_standard'].astype(str).str.strip().eq('')]
-    if not has_ward_rows and len(selected_wards) < len(all_wards):
-        return None, 'แท็บยอดตรวจทั้งหมดไม่มีข้อมูลแยกตาม Ward', pd.DataFrame()
-    if has_ward_rows and len(selected_wards) < len(all_wards):
-        selected = selected[selected['ward_standard'].isin(selected_wards)]
-        if selected.empty:
-            return None, 'แท็บยอดตรวจทั้งหมดไม่มีข้อมูลของ Ward ที่เลือก', pd.DataFrame()
-    elif has_ward_rows and not overall.empty:
-        # Prefer explicitly supplied monthly totals when viewing all Wards.
-        selected = overall
-    total = float(selected['total_specimens'].sum())
-    return (total if total > 0 else None), None, selected
-
-
 def render_rejection_rate(
     df_cases: pd.DataFrame,
     denominator: pd.DataFrame,
@@ -1479,8 +1457,9 @@ def render_rejection_rate(
     selected_wards: list,
     all_wards: list,
     denominator_sheet_found: bool = False,
+    selected_fiscal_years: list | None = None,
 ):
-    """Show rejection rate using optional monthly totals from Google Sheets."""
+    """Show rates by month and Ward using verified specimen totals."""
     st.markdown("""
     <div class="chart-card">
         <div class="chart-title">📉 อัตราการปฏิเสธสิ่งส่งตรวจ (%)</div>
@@ -1488,53 +1467,48 @@ def render_rejection_rate(
             คำนวณจาก จำนวนเคสที่ปฏิเสธ ÷ จำนวนสิ่งส่งตรวจทั้งหมด × 100
         </div>
     """, unsafe_allow_html=True)
-    total, reason, selected_denominator = _select_denominator(denominator, selected_ym, selected_wards, all_wards, denominator_sheet_found)
-    if total is None:
-        st.info("ยังคำนวณอัตราการปฏิเสธไม่ได้ เพราะยังไม่มีตัวหารจำนวนสิ่งส่งตรวจทั้งหมด")
-        st.caption("กรอกข้อมูลรายเดือนในแท็บ “ยอดตรวจทั้งหมด” แล้วระบบจะซิงก์ให้อัตโนมัติ")
-        if reason:
-            st.caption(f"สถานะตัวหาร: {reason}")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+    # Cause, risk and resolution filters must not change the numerator of a
+    # specimen rejection rate. Only time and Ward filters apply here.
+    selected_cases = df_cases[df_cases['year_month'].isin(selected_ym)]
+    if selected_fiscal_years is not None:
+        selected_cases = selected_cases[selected_cases['fiscal_year'].isin(selected_fiscal_years)]
+    effective_months = sorted(selected_cases['year_month'].unique().tolist())
+    month_table, ward_table = cleaner.get_rejection_rate_tables(
+        selected_cases, denominator, effective_months, selected_wards, all_wards
+    )
+    st.caption('อัตรานี้ใช้ตัวกรองปีงบประมาณ เดือน และ Ward; ตัวกรองสาเหตุหรือสถานะไม่เปลี่ยนจำนวนสิ่งส่งตรวจทั้งหมด')
+    valid_months = month_table[month_table['status'].eq('พร้อมใช้')]
+    if valid_months.empty:
+        st.info('ยังไม่มีอัตราการปฏิเสธจริงที่คำนวณได้จากยอดสิ่งส่งตรวจทั้งหมด')
+        st.caption('กรอกยอดตรวจจริงจาก LIS แยกเดือนและ Ward ในแท็บ “ยอดตรวจจริง” หรือเพิ่มคอลัมน์ “แหล่งข้อมูล” = LIS ในแท็บ “ยอดตรวจทั้งหมด”')
+    else:
+        if len(valid_months) < len(month_table):
+            st.warning('บางเดือนยังไม่มียอดตรวจจริงที่ครบถ้วน จึงไม่นำมาคำนวณอัตรารวม')
+        total_rejected = int(valid_months['rejected'].sum())
+        total_specimens = float(valid_months['total_specimens'].sum())
+        st.metric('อัตราการปฏิเสธของเดือนที่มีตัวหารครบ', f'{total_rejected / total_specimens * 100:.2f}%')
+        fig_rate = px.line(valid_months, x='thai_month_year', y='rate_pct', markers=True,
+                           labels={'thai_month_year': 'เดือน', 'rate_pct': 'อัตราการปฏิเสธ (%)'})
+        fig_rate.update_traces(line_color='#6c5070', marker_color='#df6a6a')
+        fig_rate.update_layout(height=280, margin=dict(l=10, r=10, t=15, b=10))
+        st.plotly_chart(fig_rate, width='stretch')
 
-    numerator = int(len(df_cases))
-    # A sheet built by counting the rejection tabs is not a valid denominator:
-    # it would show a misleading 100% rejection rate. Require total specimens
-    # to exceed rejected cases for every displayed month.
-    month_den = selected_denominator.groupby(['year_month', 'thai_month_year'], as_index=False)['total_specimens'].sum()
-    month_num = df_cases.groupby(['year_month', 'thai_month_year'], as_index=False).size().rename(columns={'size': 'rejected'})
-    rate_table = month_den.merge(month_num, on=['year_month', 'thai_month_year'], how='left').fillna({'rejected': 0})
-    missing_months = month_num.loc[~month_num['year_month'].isin(month_den['year_month'])]
-    invalid_months = rate_table[
-        (rate_table['rejected'] > 0) &
-        (rate_table['total_specimens'] <= rate_table['rejected'])
-    ]
-    if not missing_months.empty or not invalid_months.empty or (numerator > 0 and total <= numerator):
-        st.warning('ยังแสดงอัตราการปฏิเสธไม่ได้: ตัวหารต้องครอบคลุมทุกเดือนที่มีเคส และยอดตรวจทั้งหมดต้องมากกว่าเคสปฏิเสธ')
-        st.caption('โปรดใช้จำนวนสิ่งส่งตรวจทั้งหมดจากระบบห้องปฏิบัติการเป็นตัวหาร; จำนวนแถวในชีทบันทึกการปฏิเสธเป็นเพียงยอดเคสที่ปฏิเสธ')
-        st.markdown('</div>', unsafe_allow_html=True)
-        return
+    if not month_table.empty:
+        st.markdown('**รายเดือน**')
+        st.dataframe(month_table[['thai_month_year', 'rejected', 'total_specimens', 'rate_pct', 'status']].rename(columns={
+            'thai_month_year': 'เดือน', 'rejected': 'เคสปฏิเสธ', 'total_specimens': 'สิ่งส่งตรวจทั้งหมด',
+            'rate_pct': 'อัตราการปฏิเสธ (%)', 'status': 'สถานะข้อมูล'
+        }), width='stretch', hide_index=True)
 
-    rate = numerator / total * 100
-    rate_color = '#16A34A' if rate <= 1 else ('#D97706' if rate <= 3 else '#DC2626')
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric('อัตราการปฏิเสธ', f'{rate:.2f}%')
-    with c2:
-        st.metric('เคสที่ปฏิเสธ', f'{numerator:,}')
-    with c3:
-        st.metric('สิ่งส่งตรวจทั้งหมด', f'{total:,.0f}')
-    st.markdown(f"<div style='color:{rate_color};font-weight:700;margin-top:-0.35rem;'>สถานะ: {'ต่ำ' if rate <= 1 else ('เฝ้าระวัง' if rate <= 3 else 'สูง')} · ตัวหารมาจากแท็บยอดตรวจทั้งหมด</div>", unsafe_allow_html=True)
-
-    # Show monthly rate trend when monthly totals are available.
-    rate_table['rate_pct'] = rate_table['rejected'] / rate_table['total_specimens'] * 100
-    if not rate_table.empty:
-        display_rate = rate_table[['thai_month_year', 'rejected', 'total_specimens', 'rate_pct']].rename(columns={
-            'thai_month_year': 'เดือน', 'rejected': 'เคสปฏิเสธ',
-            'total_specimens': 'สิ่งส่งตรวจทั้งหมด', 'rate_pct': 'อัตราการปฏิเสธ (%)'
-        })
-        display_rate['อัตราการปฏิเสธ (%)'] = display_rate['อัตราการปฏิเสธ (%)'].round(2)
-        st.dataframe(display_rate, width='stretch', hide_index=True)
+    if not ward_table.empty:
+        st.markdown('**รายเดือน × Ward**')
+        st.dataframe(ward_table[['thai_month_year', 'ward_standard', 'rejected', 'total_specimens', 'rate_pct', 'status']].rename(columns={
+            'thai_month_year': 'เดือน', 'ward_standard': 'Ward', 'rejected': 'เคสปฏิเสธ',
+            'total_specimens': 'สิ่งส่งตรวจทั้งหมด', 'rate_pct': 'อัตราการปฏิเสธ (%)',
+            'status': 'สถานะข้อมูล'
+        }), width='stretch', hide_index=True)
+    elif denominator_sheet_found:
+        st.caption('ยังไม่มียอดตรวจจริงแยก Ward จึงยังแสดงอัตราราย Ward ไม่ได้')
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1677,12 +1651,13 @@ def main():
 
         render_quality_target(df_cases)
         render_rejection_rate(
-            df_cases,
+            bundle['df_cases_all'],
             bundle['denominator'],
             bundle['selected_ym'],
             bundle['selected_wards'],
             bundle['all_wards'],
             bundle['denominator_sheet_found'],
+            bundle['selected_fiscal_years'],
         )
             
         # ROW 4: Top 10 Wards (50%) + Top 10 Root Causes (50%)

@@ -24,9 +24,14 @@ multiple rejection reasons.
 
 ## Rejection rate (%)
 
-The dashboard does not infer a denominator from rejected cases. To calculate a
-real rejection rate, optionally add a tab named `ยอดตรวจทั้งหมด` with two columns:
-`เดือน` and `จำนวนสิ่งส่งตรวจทั้งหมด`. Use month values such as `ต.ค. 69`,
-`2026-10`, or a spreadsheet date. The dashboard will show the overall and
-monthly rate after the next sync. An optional `Ward` column enables Ward-level
-rates; without it, the rate is available for the overall selected period only.
+The dashboard does not infer a denominator from rejected cases. The existing
+auto-generated `ยอดตรวจทั้งหมด` tab counts rejection records and is ignored
+unless a row explicitly has `แหล่งข้อมูล` = `LIS`. For real rates, add a
+separate tab named `ยอดตรวจจริง` with `เดือน`, `Ward`, and
+`จำนวนสิ่งส่งตรวจทั้งหมด`, populated from the laboratory information system.
+Use month values such as `ต.ค. 69`, `2026-10`, or a spreadsheet date. Add one
+row per month and Ward; a blank Ward can hold the hospital-wide monthly total.
+The dashboard calculates monthly and month-by-Ward rejection rates after the
+next sync. Months or Wards without a valid total are marked as unavailable.
+Rate numerators are affected by fiscal-year, month, and Ward filters, but not
+by cause or resolution filters.
