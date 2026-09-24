@@ -21,3 +21,12 @@ The dashboard picks up new rows and fiscal years automatically within 15 minutes
 while open (or on the next visit). Tabs without a year or a readable header are
 skipped and reported in the dashboard. A case is counted once even if it has
 multiple rejection reasons.
+
+## Rejection rate (%)
+
+The dashboard does not infer a denominator from rejected cases. To calculate a
+real rejection rate, optionally add a tab named `ยอดตรวจทั้งหมด` with two columns:
+`เดือน` and `จำนวนสิ่งส่งตรวจทั้งหมด`. Use month values such as `ต.ค. 69`,
+`2026-10`, or a spreadsheet date. The dashboard will show the overall and
+monthly rate after the next sync. An optional `Ward` column enables Ward-level
+rates; without it, the rate is available for the overall selected period only.

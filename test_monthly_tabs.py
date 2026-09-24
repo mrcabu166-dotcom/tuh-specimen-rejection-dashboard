@@ -11,7 +11,7 @@ from cleaner import load_and_consolidate, parse_sheet_month
 HEADERS = ['วันที่', 'เวลา', 'HN', 'Ward', 'สิ่งส่งตรวจ', 'ใบส่งตรวจ']
 
 
-def make_workbook(november_has_case=False):
+def make_workbook(november_has_case=False, with_denominator=False):
     book = Workbook()
     book.remove(book.active)
 
@@ -30,6 +30,12 @@ def make_workbook(november_has_case=False):
     monthly_sheet('ต.ค.', 4)  # missing year, cannot be assigned safely
     monthly_sheet('หมายเหตุ ต.ค. 69', 6)  # helper tab, not a monthly tab
     monthly_sheet('สรุป', 7)  # existing summary, must not double count
+    if with_denominator:
+        totals = book.create_sheet('ยอดตรวจทั้งหมด')
+        totals.append(['เดือน', 'จำนวนสิ่งส่งตรวจทั้งหมด'])
+        totals.append(['ต.ค. 69', 100])
+        totals.append(['พ.ย. 69', 200])
+        totals.append(['ม.ค. 70', 300])
 
     result = io.BytesIO()
     book.save(result)
@@ -73,6 +79,12 @@ class MonthlyTabsTest(unittest.TestCase):
         cases, _ = load_and_consolidate(result)
         self.assertTrue(cases.empty)
         self.assertTrue(cases.attrs['ingestion_warnings'])
+
+    def test_optional_denominator_sheet_is_loaded(self):
+        cases, _ = load_and_consolidate(make_workbook(with_denominator=True))
+        denominator = cases.attrs['denominator']
+        self.assertEqual(denominator['year_month'].tolist(), ['2026-10', '2026-11', '2027-01'])
+        self.assertEqual(denominator['total_specimens'].tolist(), [100.0, 200.0, 300.0])
 
 
 if __name__ == '__main__':

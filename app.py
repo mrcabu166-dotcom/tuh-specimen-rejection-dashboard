@@ -12,6 +12,8 @@ import re
 import base64
 import time
 import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -530,9 +532,24 @@ def load_data(file_source, cache_version="monthly-tabs-20260924"):
         return result
 
     ingestion_warnings = df_cases.attrs.get('ingestion_warnings', [])
+    denominator = df_cases.attrs.get('denominator', pd.DataFrame())
     public_cases = mask_public_identifiers(ensure_fiscal_year(df_cases))
     public_causes = mask_public_identifiers(ensure_fiscal_year(df_causes))
     public_cases.attrs['ingestion_warnings'] = ingestion_warnings
+    # Keep DataFrame metadata JSON-serializable so Streamlit can render tables
+    # without warnings when the source has an optional denominator sheet.
+    public_cases.attrs = {}
+    public_cases.attrs['denominator_records'] = denominator.to_dict('records') if not denominator.empty else []
+    latest_date = pd.to_datetime(public_cases.get('date'), errors='coerce').dropna()
+    public_cases.attrs['sync_meta'] = {
+        'status': 'success',
+        'synced_at': datetime.now(ZoneInfo('Asia/Bangkok')).strftime('%d/%m/%Y %H:%M น.'),
+        'source': 'Google Sheets' if isinstance(file_source, str) and file_source.startswith(('http://', 'https://')) else 'ไฟล์อัปโหลด',
+        'sheet_count': int(public_cases['source_sheet'].nunique()) if 'source_sheet' in public_cases.columns else 0,
+        'case_count': int(len(public_cases)),
+        'latest_date': latest_date.max().strftime('%Y-%m-%d') if not latest_date.empty else None,
+        'denominator_rows': int(len(denominator)),
+    }
     return public_cases, public_causes
 
 
@@ -710,11 +727,21 @@ def render_sidebar():
                 st.stop()
 
         st.caption(f"📄 ใช้ข้อมูล: `{source_label}`")
+        sync_meta = df_cases_all.attrs.get('sync_meta', {})
         if active_source == GOOGLE_SHEET_XLSX_URL:
-            st.caption("🔄 ซิงก์จาก Google Sheets อัตโนมัติทุก 15 นาที")
-            st.caption("เพิ่มชีทเดือนใหม่ได้เลย เช่น ต.ค. 69 หรือ ม.ค. 70")
+            sync_time_text = sync_meta.get('synced_at') or 'ยังไม่ทราบเวลา'
+            sheet_count = sync_meta.get('sheet_count', 0)
+            sync_denominator = sync_meta.get('denominator_rows', 0)
+            st.markdown(
+                f"<div style='background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;padding:0.65rem 0.75rem;margin:0.45rem 0 0.7rem;'>"
+                f"<div style='font-weight:700;color:#166534;'>✅ ซิงก์ Google Sheets สำเร็จ</div>"
+                f"<div style='font-size:0.76rem;color:#475569;margin-top:0.2rem;'>อัปเดตล่าสุด: {sync_time_text}<br>อ่านแล้ว {sheet_count} ชีทรายเดือน · รีเฟรชอัตโนมัติทุก 15 นาที</div>"
+                f"<div style='font-size:0.74rem;color:#64748B;margin-top:0.25rem;'>ตัวหารอัตราการปฏิเสธ: {'พร้อมใช้งาน' if sync_denominator else 'ยังไม่พบแท็บยอดตรวจทั้งหมด'}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
         elif google_sync_error is not None:
-            st.warning("เชื่อม Google Sheets ไม่สำเร็จ จึงใช้ไฟล์สำรองในแอปชั่วคราว — ตรวจสิทธิ์แชร์ชีตเป็น Viewer สำหรับผู้ที่มีลิงก์")
+            st.error("❌ ซิงก์ Google Sheets ไม่สำเร็จ — ขณะนี้ใช้ไฟล์สำรองในแอป ตัวเลขอาจยังไม่ใช่ข้อมูลล่าสุด")
 
         for warning in df_cases_all.attrs.get('ingestion_warnings', []):
             st.warning(warning)
@@ -878,6 +905,7 @@ def render_sidebar():
     filter_bundle = {
         'df_cases_all': df_cases_all,
         'df_causes_all': df_causes_all,
+        'denominator': pd.DataFrame(df_cases_all.attrs.get('denominator_records', [])),
         'selected_fiscal_years': selected_fiscal_years,
         'selected_ym': selected_ym,
         'selected_months_th': selected_months_th,
@@ -888,6 +916,7 @@ def render_sidebar():
         'selected_specimens': selected_specimens,
         'selected_risks': selected_risks,
         'selected_resolutions': selected_resolutions,
+        'all_wards': sorted(df_cases_all['ward_standard'].dropna().unique().tolist()),
         'active_count': active_count
     }
     return filter_bundle
@@ -1415,6 +1444,77 @@ def render_quality_target(df_cases: pd.DataFrame):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _select_denominator(denominator: pd.DataFrame, selected_ym: list, selected_wards: list, all_wards: list) -> tuple[float | None, str | None, pd.DataFrame]:
+    """Select monthly totals for the current filters without double-counting."""
+    if denominator is None or denominator.empty:
+        return None, 'ยังไม่พบแท็บยอดตรวจทั้งหมด', pd.DataFrame()
+    selected = denominator[denominator['year_month'].isin(selected_ym)].copy()
+    if selected.empty:
+        return None, 'ยังไม่มีตัวหารของเดือนที่เลือก', pd.DataFrame()
+    has_ward_rows = selected['ward_standard'].astype(str).str.strip().ne('').any()
+    overall = selected[selected['ward_standard'].astype(str).str.strip().eq('')]
+    if has_ward_rows and len(selected_wards) < len(all_wards):
+        selected = selected[selected['ward_standard'].isin(selected_wards)]
+        if selected.empty:
+            return None, 'แท็บยอดตรวจทั้งหมดไม่มีข้อมูลของ Ward ที่เลือก', pd.DataFrame()
+    elif has_ward_rows and not overall.empty:
+        # Prefer explicitly supplied monthly totals when viewing all Wards.
+        selected = overall
+    total = float(selected['total_specimens'].sum())
+    return (total if total > 0 else None), None, selected
+
+
+def render_rejection_rate(
+    df_cases: pd.DataFrame,
+    denominator: pd.DataFrame,
+    selected_ym: list,
+    selected_wards: list,
+    all_wards: list,
+):
+    """Show rejection rate using optional monthly totals from Google Sheets."""
+    st.markdown("""
+    <div class="chart-card">
+        <div class="chart-title">📉 อัตราการปฏิเสธสิ่งส่งตรวจ (%)</div>
+        <div style="font-size:0.82rem;color:#64748B;margin-bottom:0.8rem;">
+            คำนวณจาก จำนวนเคสที่ปฏิเสธ ÷ จำนวนสิ่งส่งตรวจทั้งหมด × 100
+        </div>
+    """, unsafe_allow_html=True)
+    total, reason, selected_denominator = _select_denominator(denominator, selected_ym, selected_wards, all_wards)
+    if total is None:
+        st.info("ยังคำนวณอัตราการปฏิเสธไม่ได้ เพราะยังไม่มีตัวหารจำนวนสิ่งส่งตรวจทั้งหมด")
+        st.caption("เพิ่มแท็บชื่อ “ยอดตรวจทั้งหมด” ใน Google Sheets โดยมีคอลัมน์ “เดือน” และ “จำนวนสิ่งส่งตรวจทั้งหมด” แล้วระบบจะซิงก์ให้อัตโนมัติ")
+        if reason:
+            st.caption(f"สถานะตัวหาร: {reason}")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    numerator = int(len(df_cases))
+    rate = numerator / total * 100
+    rate_color = '#16A34A' if rate <= 1 else ('#D97706' if rate <= 3 else '#DC2626')
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric('อัตราการปฏิเสธ', f'{rate:.2f}%')
+    with c2:
+        st.metric('เคสที่ปฏิเสธ', f'{numerator:,}')
+    with c3:
+        st.metric('สิ่งส่งตรวจทั้งหมด', f'{total:,.0f}')
+    st.markdown(f"<div style='color:{rate_color};font-weight:700;margin-top:-0.35rem;'>สถานะ: {'ต่ำ' if rate <= 1 else ('เฝ้าระวัง' if rate <= 3 else 'สูง')} · ตัวหารมาจากแท็บยอดตรวจทั้งหมด</div>", unsafe_allow_html=True)
+
+    # Show monthly rate trend when monthly totals are available.
+    month_den = selected_denominator.groupby(['year_month', 'thai_month_year'], as_index=False)['total_specimens'].sum()
+    month_num = df_cases.groupby(['year_month', 'thai_month_year'], as_index=False).size().rename(columns={'size': 'rejected'})
+    rate_table = month_den.merge(month_num, on=['year_month', 'thai_month_year'], how='left').fillna({'rejected': 0})
+    rate_table['rate_pct'] = rate_table['rejected'] / rate_table['total_specimens'] * 100
+    if not rate_table.empty:
+        display_rate = rate_table[['thai_month_year', 'rejected', 'total_specimens', 'rate_pct']].rename(columns={
+            'thai_month_year': 'เดือน', 'rejected': 'เคสปฏิเสธ',
+            'total_specimens': 'สิ่งส่งตรวจทั้งหมด', 'rate_pct': 'อัตราการปฏิเสธ (%)'
+        })
+        display_rate['อัตราการปฏิเสธ (%)'] = display_rate['อัตราการปฏิเสธ (%)'].round(2)
+        st.dataframe(display_rate, width='stretch', hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def render_data_quality_check(df_cases: pd.DataFrame, df_causes: pd.DataFrame):
     """Audit dates, duplicate records, Ward mappings, and cause grouping."""
     cases = df_cases.copy()
@@ -1553,6 +1653,13 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
         render_quality_target(df_cases)
+        render_rejection_rate(
+            df_cases,
+            bundle['denominator'],
+            bundle['selected_ym'],
+            bundle['selected_wards'],
+            bundle['all_wards'],
+        )
             
         # ROW 4: Top 10 Wards (50%) + Top 10 Root Causes (50%)
         col_w, col_r = st.columns([1, 1])

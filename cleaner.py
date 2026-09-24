@@ -35,6 +35,12 @@ THAI_MONTH_NAMES_SHORT = [
     'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
 ]
 
+DENOMINATOR_SHEET_MARKERS = (
+    'ยอดตรวจทั้งหมด', 'ยอดสิ่งส่งตรวจ', 'จำนวนสิ่งส่งตรวจทั้งหมด',
+    'ตัวหาร', 'denominator', 'total specimen', 'total specimens',
+    'total sample', 'total samples'
+)
+
 MONTH_SHEET_PATTERN = re.compile(
     r"^\s*(?P<month>" + "|".join(re.escape(name) for name in sorted(THAI_MONTHS, key=len, reverse=True))
     + r")\s*(?P<year>[0-9๐-๙]{2}|[0-9๐-๙]{4})\s*$"
@@ -582,6 +588,83 @@ def read_excel_sheet_data(xl: pd.ExcelFile, sheet_name: str) -> tuple[pd.DataFra
     return df_data, h_idx
 
 
+def _parse_period_value(value) -> tuple[str | None, str | None]:
+    """Return ISO year-month and Thai label from a denominator period cell."""
+    if pd.isna(value):
+        return None, None
+    text = str(value).strip()
+    if not text or text in {'nan', 'None', '-'}:
+        return None, None
+    parsed = parse_sheet_month(text)
+    if parsed[0] is not None:
+        month, year_ce, label = parsed
+        return f'{year_ce:04d}-{month:02d}', label
+    match = re.fullmatch(r'(\d{4})[-/]([01]?\d)', text)
+    if match:
+        year, month = int(match.group(1)), int(match.group(2))
+        if 1 <= month <= 12:
+            year_ce = year - 543 if year >= 2400 else year
+            return f'{year_ce:04d}-{month:02d}', f'{THAI_MONTH_NAMES_SHORT[month]} {year_ce + 543}'
+    parsed_date = pd.to_datetime(value, errors='coerce')
+    if not pd.isna(parsed_date):
+        return f'{parsed_date.year:04d}-{parsed_date.month:02d}', f'{THAI_MONTH_NAMES_SHORT[parsed_date.month]} {parsed_date.year + 543}'
+    return None, None
+
+
+def _read_denominator_sheets(xl: pd.ExcelFile, sheet_names: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """Read optional monthly totals used as the denominator of rejection rate."""
+    records = []
+    warnings = []
+    for sheet_name in sheet_names:
+        name_lower = sheet_name.strip().lower()
+        if not any(marker.lower() in name_lower for marker in DENOMINATOR_SHEET_MARKERS):
+            continue
+        raw = xl.parse(sheet_name, header=None)
+        if raw.empty:
+            warnings.append(f"ชีทตัวหาร '{sheet_name}' ยังไม่มีข้อมูล")
+            continue
+        header_idx = None
+        for idx in range(min(20, len(raw))):
+            row_text = ' '.join(str(v).strip().lower() for v in raw.iloc[idx].tolist() if pd.notna(v))
+            has_period = any(token in row_text for token in ['เดือน', 'month', 'ปี', 'year', 'งวด'])
+            has_total = any(token in row_text for token in ['จำนวนสิ่งส่งตรวจทั้งหมด', 'ยอดตรวจ', 'ตัวหาร', 'total specimen', 'total sample', 'จำนวนทั้งหมด'])
+            if has_period and has_total:
+                header_idx = idx
+                break
+        if header_idx is None:
+            warnings.append(f"ชีทตัวหาร '{sheet_name}' ต้องมีคอลัมน์ เดือน และ จำนวนสิ่งส่งตรวจทั้งหมด")
+            continue
+
+        table = raw.iloc[header_idx + 1:].copy()
+        headers = [str(v).strip() if pd.notna(v) else '' for v in raw.iloc[header_idx].tolist()]
+        table.columns = headers[:len(table.columns)]
+        period_col = next((c for c in table.columns if any(token in str(c).lower() for token in ['เดือน', 'month', 'งวด', 'year_month'])), None)
+        total_col = next((c for c in table.columns if any(token in str(c).lower() for token in ['จำนวนสิ่งส่งตรวจทั้งหมด', 'ยอดตรวจ', 'ตัวหาร', 'total specimen', 'total sample', 'จำนวนทั้งหมด'])), None)
+        ward_col = next((c for c in table.columns if 'ward' in str(c).lower() or 'หอผู้ป่วย' in str(c).lower()), None)
+        if period_col is None or total_col is None:
+            warnings.append(f"ชีทตัวหาร '{sheet_name}' ต้องมีคอลัมน์ เดือน และ จำนวนสิ่งส่งตรวจทั้งหมด")
+            continue
+        for _, row in table.iterrows():
+            year_month, thai_label = _parse_period_value(row.get(period_col))
+            total = pd.to_numeric(str(row.get(total_col, '')).replace(',', '').strip(), errors='coerce')
+            if year_month is None or pd.isna(total) or float(total) <= 0:
+                continue
+            ward_raw = str(row.get(ward_col, '')).strip() if ward_col is not None else ''
+            ward_standard = standardize_ward(ward_raw)[0] if ward_raw and ward_raw not in {'nan', 'None'} else ''
+            records.append({
+                'year_month': year_month,
+                'thai_month_year': thai_label,
+                'ward_standard': ward_standard,
+                'total_specimens': float(total),
+                'source_sheet': sheet_name,
+            })
+    if not records:
+        return pd.DataFrame(columns=['year_month', 'thai_month_year', 'ward_standard', 'total_specimens', 'source_sheet']), warnings
+    denominator = pd.DataFrame(records)
+    denominator['total_specimens'] = denominator['total_specimens'].astype(float)
+    return denominator, warnings
+
+
 # ==============================================================================
 # 3. CORE DATA INGESTION & NORMALIZATION
 # ==============================================================================
@@ -837,6 +920,8 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
         monthly_sheets = []
         ingestion_warnings = []
         has_month_like_tabs = False
+        denominator, denominator_warnings = _read_denominator_sheets(xl, all_sheet_names)
+        ingestion_warnings.extend(denominator_warnings)
         for s in all_sheet_names:
             if s.strip() in ['สรุป', 'Summary', 'All', 'Sheet1', 'sheet1']:
                 continue
@@ -905,6 +990,7 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
     if not all_dfs:
         empty_cases, empty_causes = pd.DataFrame(), pd.DataFrame()
         empty_cases.attrs['ingestion_warnings'] = ingestion_warnings if is_excel else []
+        empty_cases.attrs['denominator'] = denominator if is_excel else pd.DataFrame()
         return empty_cases, empty_causes
 
     df_cases = pd.concat(all_dfs, ignore_index=True)
@@ -914,6 +1000,7 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
     df_causes = unpivot_causes(df_cases)
 
     df_cases.attrs['ingestion_warnings'] = ingestion_warnings if is_excel else []
+    df_cases.attrs['denominator'] = denominator if is_excel else pd.DataFrame()
 
     return df_cases, df_causes
 
