@@ -44,3 +44,7 @@ The dashboard also syncs the shared workbook `รวมสถิติการ�
 block can be added without changing the parser. The tab provides fiscal-year
 selection, specimen-type filters, monthly totals, year-to-year comparison, a
 monthly breakdown table, and CSV export.
+The `ยอดตรวจทั้งหมด` tab can include an explicit `LIS` column for overall
+monthly totals. These rows keep Ward blank because the microbiology workbook
+does not provide Ward-level counts, so the same LIS total is never repeated
+across individual Ward rows.

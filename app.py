@@ -462,7 +462,7 @@ MICROBIOLOGY_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{MICROBIOLOGY_S
 DEFAULT_MONTHLY_QUALITY_TARGET = 30
 
 @st.cache_data(show_spinner="กำลังซิงก์และประมวลผลข้อมูล...", ttl=900)
-def load_data(file_source, cache_version="monthly-tabs-20260924"):
+def load_data(file_source, cache_version="monthly-tabs-20260924-v2"):
     source_for_cleaner = file_source
     if isinstance(file_source, str) and file_source.startswith(('http://', 'https://')):
         response = requests.get(file_source, timeout=45)

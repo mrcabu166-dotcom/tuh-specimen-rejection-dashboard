@@ -646,7 +646,11 @@ def _read_denominator_sheets(xl: pd.ExcelFile, sheet_names: list[str]) -> tuple[
         headers = [str(v).strip() if pd.notna(v) else '' for v in raw.iloc[header_idx].tolist()]
         table.columns = headers[:len(table.columns)]
         period_col = next((c for c in table.columns if any(token in str(c).lower() for token in ['เดือน', 'month', 'งวด', 'year_month'])), None)
-        total_col = next((c for c in table.columns if any(token in str(c).lower() for token in ['จำนวนสิ่งส่งตรวจทั้งหมด', 'ยอดตรวจ', 'ตัวหาร', 'total specimen', 'total sample', 'จำนวนทั้งหมด'])), None)
+        # Prefer an explicit LIS column when present. It is used for the
+        # overall monthly rows appended to ``ยอดตรวจทั้งหมด``; Ward rows stay
+        # blank because the microbiology source has no Ward dimension.
+        lis_col = next((c for c in table.columns if 'lis' in str(c).lower()), None)
+        total_col = lis_col or next((c for c in table.columns if any(token in str(c).lower() for token in ['จำนวนสิ่งส่งตรวจทั้งหมด', 'ยอดตรวจ', 'ตัวหาร', 'total specimen', 'total sample', 'จำนวนทั้งหมด'])), None)
         ward_col = next((c for c in table.columns if 'ward' in str(c).lower() or 'หอผู้ป่วย' in str(c).lower()), None)
         source_col = next((c for c in table.columns if 'แหล่งข้อมูล' in str(c).lower() or 'data source' in str(c).lower()), None)
         if period_col is None or total_col is None:
@@ -654,7 +658,7 @@ def _read_denominator_sheets(xl: pd.ExcelFile, sheet_names: list[str]) -> tuple[
             continue
         # The old auto-generated tab counts rejected rows. Accept a dedicated
         # real-totals tab or rows explicitly marked as LIS data only.
-        dedicated_lis_sheet = 'ยอดตรวจจริง' in name_lower
+        dedicated_lis_sheet = 'ยอดตรวจจริง' in name_lower or lis_col is not None
         if not dedicated_lis_sheet and source_col is None:
             warnings.append(f"ชีทตัวหาร '{sheet_name}' ไม่มีคอลัมน์แหล่งข้อมูล; ข้ามยอดที่อาจนับจากเคสปฏิเสธ")
             continue

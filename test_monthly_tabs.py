@@ -4,7 +4,7 @@ import io
 import unittest
 
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from cleaner import get_kpis, get_rejection_rate_tables, load_and_consolidate, load_microbiology_stats, parse_sheet_month
 
@@ -103,6 +103,23 @@ class MonthlyTabsTest(unittest.TestCase):
         cases, _ = load_and_consolidate(source)
         self.assertTrue(cases.attrs['denominator'].empty)
         self.assertTrue(any('แหล่งข้อมูล' in warning for warning in cases.attrs['ingestion_warnings']))
+
+    def test_lis_column_is_used_only_for_overall_rows(self):
+        result = make_workbook(with_denominator=True)
+        book = load_workbook(result)
+        sheet = book['ยอดตรวจทั้งหมด']
+        sheet['D1'] = 'LIS'
+        sheet.append(['ก.ค. 69', None, None, 8806])
+        result = io.BytesIO()
+        book.save(result)
+        result.seek(0)
+
+        cases, _ = load_and_consolidate(result)
+        denominator = cases.attrs['denominator']
+        self.assertEqual(len(denominator), 1)
+        self.assertEqual(denominator.iloc[0]['year_month'], '2026-07')
+        self.assertEqual(denominator.iloc[0]['total_specimens'], 8806.0)
+        self.assertEqual(denominator.iloc[0]['ward_standard'], '')
 
     def test_microbiology_parser_reads_repeated_fiscal_year_blocks(self):
         book = Workbook()
