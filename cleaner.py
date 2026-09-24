@@ -615,10 +615,12 @@ def _read_denominator_sheets(xl: pd.ExcelFile, sheet_names: list[str]) -> tuple[
     """Read optional monthly totals used as the denominator of rejection rate."""
     records = []
     warnings = []
+    found_sheet_names = []
     for sheet_name in sheet_names:
         name_lower = sheet_name.strip().lower()
         if not any(marker.lower() in name_lower for marker in DENOMINATOR_SHEET_MARKERS):
             continue
+        found_sheet_names.append(sheet_name)
         raw = xl.parse(sheet_name, header=None)
         if raw.empty:
             warnings.append(f"ชีทตัวหาร '{sheet_name}' ยังไม่มีข้อมูล")
@@ -659,9 +661,12 @@ def _read_denominator_sheets(xl: pd.ExcelFile, sheet_names: list[str]) -> tuple[
                 'source_sheet': sheet_name,
             })
     if not records:
-        return pd.DataFrame(columns=['year_month', 'thai_month_year', 'ward_standard', 'total_specimens', 'source_sheet']), warnings
+        empty = pd.DataFrame(columns=['year_month', 'thai_month_year', 'ward_standard', 'total_specimens', 'source_sheet'])
+        empty.attrs['sheet_names'] = found_sheet_names
+        return empty, warnings
     denominator = pd.DataFrame(records)
     denominator['total_specimens'] = denominator['total_specimens'].astype(float)
+    denominator.attrs['sheet_names'] = found_sheet_names
     return denominator, warnings
 
 
@@ -921,6 +926,7 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
         ingestion_warnings = []
         has_month_like_tabs = False
         denominator, denominator_warnings = _read_denominator_sheets(xl, all_sheet_names)
+        denominator_sheet_found = bool(denominator.attrs.get('sheet_names', []))
         ingestion_warnings.extend(denominator_warnings)
         for s in all_sheet_names:
             if s.strip() in ['สรุป', 'Summary', 'All', 'Sheet1', 'sheet1']:
@@ -991,6 +997,7 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
         empty_cases, empty_causes = pd.DataFrame(), pd.DataFrame()
         empty_cases.attrs['ingestion_warnings'] = ingestion_warnings if is_excel else []
         empty_cases.attrs['denominator'] = denominator if is_excel else pd.DataFrame()
+        empty_cases.attrs['denominator_sheet_found'] = denominator_sheet_found if is_excel else False
         return empty_cases, empty_causes
 
     df_cases = pd.concat(all_dfs, ignore_index=True)
@@ -1001,6 +1008,7 @@ def load_and_consolidate(file_source) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     df_cases.attrs['ingestion_warnings'] = ingestion_warnings if is_excel else []
     df_cases.attrs['denominator'] = denominator if is_excel else pd.DataFrame()
+    df_cases.attrs['denominator_sheet_found'] = denominator_sheet_found if is_excel else False
 
     return df_cases, df_causes
 

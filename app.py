@@ -533,6 +533,7 @@ def load_data(file_source, cache_version="monthly-tabs-20260924"):
 
     ingestion_warnings = df_cases.attrs.get('ingestion_warnings', [])
     denominator = df_cases.attrs.get('denominator', pd.DataFrame())
+    denominator_sheet_found = bool(df_cases.attrs.get('denominator_sheet_found', False))
     public_cases = mask_public_identifiers(ensure_fiscal_year(df_cases))
     public_causes = mask_public_identifiers(ensure_fiscal_year(df_causes))
     public_cases.attrs['ingestion_warnings'] = ingestion_warnings
@@ -540,6 +541,7 @@ def load_data(file_source, cache_version="monthly-tabs-20260924"):
     # without warnings when the source has an optional denominator sheet.
     public_cases.attrs = {}
     public_cases.attrs['denominator_records'] = denominator.to_dict('records') if not denominator.empty else []
+    public_cases.attrs['denominator_sheet_found'] = denominator_sheet_found
     latest_date = pd.to_datetime(public_cases.get('date'), errors='coerce').dropna()
     public_cases.attrs['sync_meta'] = {
         'status': 'success',
@@ -549,6 +551,7 @@ def load_data(file_source, cache_version="monthly-tabs-20260924"):
         'case_count': int(len(public_cases)),
         'latest_date': latest_date.max().strftime('%Y-%m-%d') if not latest_date.empty else None,
         'denominator_rows': int(len(denominator)),
+        'denominator_sheet_found': denominator_sheet_found,
     }
     return public_cases, public_causes
 
@@ -732,11 +735,13 @@ def render_sidebar():
             sync_time_text = sync_meta.get('synced_at') or 'ยังไม่ทราบเวลา'
             sheet_count = sync_meta.get('sheet_count', 0)
             sync_denominator = sync_meta.get('denominator_rows', 0)
+            sync_denominator_sheet = sync_meta.get('denominator_sheet_found', False)
+            denominator_status = 'พร้อมใช้งาน' if sync_denominator else ('พบแท็บแล้ว รอข้อมูล' if sync_denominator_sheet else 'ยังไม่พบแท็บยอดตรวจทั้งหมด')
             st.markdown(
                 f"<div style='background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;padding:0.65rem 0.75rem;margin:0.45rem 0 0.7rem;'>"
                 f"<div style='font-weight:700;color:#166534;'>✅ ซิงก์ Google Sheets สำเร็จ</div>"
                 f"<div style='font-size:0.76rem;color:#475569;margin-top:0.2rem;'>อัปเดตล่าสุด: {sync_time_text}<br>อ่านแล้ว {sheet_count} ชีทรายเดือน · รีเฟรชอัตโนมัติทุก 15 นาที</div>"
-                f"<div style='font-size:0.74rem;color:#64748B;margin-top:0.25rem;'>ตัวหารอัตราการปฏิเสธ: {'พร้อมใช้งาน' if sync_denominator else 'ยังไม่พบแท็บยอดตรวจทั้งหมด'}</div>"
+                f"<div style='font-size:0.74rem;color:#64748B;margin-top:0.25rem;'>ตัวหารอัตราการปฏิเสธ: {denominator_status}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -906,6 +911,7 @@ def render_sidebar():
         'df_cases_all': df_cases_all,
         'df_causes_all': df_causes_all,
         'denominator': pd.DataFrame(df_cases_all.attrs.get('denominator_records', [])),
+        'denominator_sheet_found': bool(df_cases_all.attrs.get('denominator_sheet_found', False)),
         'selected_fiscal_years': selected_fiscal_years,
         'selected_ym': selected_ym,
         'selected_months_th': selected_months_th,
@@ -1444,10 +1450,10 @@ def render_quality_target(df_cases: pd.DataFrame):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _select_denominator(denominator: pd.DataFrame, selected_ym: list, selected_wards: list, all_wards: list) -> tuple[float | None, str | None, pd.DataFrame]:
+def _select_denominator(denominator: pd.DataFrame, selected_ym: list, selected_wards: list, all_wards: list, denominator_sheet_found: bool = False) -> tuple[float | None, str | None, pd.DataFrame]:
     """Select monthly totals for the current filters without double-counting."""
     if denominator is None or denominator.empty:
-        return None, 'ยังไม่พบแท็บยอดตรวจทั้งหมด', pd.DataFrame()
+        return None, ('พบแท็บแล้ว แต่ยังไม่มีข้อมูลตัวหาร' if denominator_sheet_found else 'ยังไม่พบแท็บยอดตรวจทั้งหมด'), pd.DataFrame()
     selected = denominator[denominator['year_month'].isin(selected_ym)].copy()
     if selected.empty:
         return None, 'ยังไม่มีตัวหารของเดือนที่เลือก', pd.DataFrame()
@@ -1472,6 +1478,7 @@ def render_rejection_rate(
     selected_ym: list,
     selected_wards: list,
     all_wards: list,
+    denominator_sheet_found: bool = False,
 ):
     """Show rejection rate using optional monthly totals from Google Sheets."""
     st.markdown("""
@@ -1481,10 +1488,10 @@ def render_rejection_rate(
             คำนวณจาก จำนวนเคสที่ปฏิเสธ ÷ จำนวนสิ่งส่งตรวจทั้งหมด × 100
         </div>
     """, unsafe_allow_html=True)
-    total, reason, selected_denominator = _select_denominator(denominator, selected_ym, selected_wards, all_wards)
+    total, reason, selected_denominator = _select_denominator(denominator, selected_ym, selected_wards, all_wards, denominator_sheet_found)
     if total is None:
         st.info("ยังคำนวณอัตราการปฏิเสธไม่ได้ เพราะยังไม่มีตัวหารจำนวนสิ่งส่งตรวจทั้งหมด")
-        st.caption("เพิ่มแท็บชื่อ “ยอดตรวจทั้งหมด” ใน Google Sheets โดยมีคอลัมน์ “เดือน” และ “จำนวนสิ่งส่งตรวจทั้งหมด” แล้วระบบจะซิงก์ให้อัตโนมัติ")
+        st.caption("กรอกข้อมูลรายเดือนในแท็บ “ยอดตรวจทั้งหมด” แล้วระบบจะซิงก์ให้อัตโนมัติ")
         if reason:
             st.caption(f"สถานะตัวหาร: {reason}")
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1661,6 +1668,7 @@ def main():
             bundle['selected_ym'],
             bundle['selected_wards'],
             bundle['all_wards'],
+            bundle['denominator_sheet_found'],
         )
             
         # ROW 4: Top 10 Wards (50%) + Top 10 Root Causes (50%)

@@ -85,6 +85,7 @@ class MonthlyTabsTest(unittest.TestCase):
         denominator = cases.attrs['denominator']
         self.assertEqual(denominator['year_month'].tolist(), ['2026-10', '2026-11', '2027-01'])
         self.assertEqual(denominator['total_specimens'].tolist(), [100.0, 200.0, 300.0])
+        self.assertTrue(cases.attrs['denominator_sheet_found'])
 
 
 if __name__ == '__main__':
