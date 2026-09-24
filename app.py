@@ -1498,6 +1498,23 @@ def render_rejection_rate(
         return
 
     numerator = int(len(df_cases))
+    # A sheet built by counting the rejection tabs is not a valid denominator:
+    # it would show a misleading 100% rejection rate. Require total specimens
+    # to exceed rejected cases for every displayed month.
+    month_den = selected_denominator.groupby(['year_month', 'thai_month_year'], as_index=False)['total_specimens'].sum()
+    month_num = df_cases.groupby(['year_month', 'thai_month_year'], as_index=False).size().rename(columns={'size': 'rejected'})
+    rate_table = month_den.merge(month_num, on=['year_month', 'thai_month_year'], how='left').fillna({'rejected': 0})
+    missing_months = month_num.loc[~month_num['year_month'].isin(month_den['year_month'])]
+    invalid_months = rate_table[
+        (rate_table['rejected'] > 0) &
+        (rate_table['total_specimens'] <= rate_table['rejected'])
+    ]
+    if not missing_months.empty or not invalid_months.empty or (numerator > 0 and total <= numerator):
+        st.warning('ยังแสดงอัตราการปฏิเสธไม่ได้: ตัวหารต้องครอบคลุมทุกเดือนที่มีเคส และยอดตรวจทั้งหมดต้องมากกว่าเคสปฏิเสธ')
+        st.caption('โปรดใช้จำนวนสิ่งส่งตรวจทั้งหมดจากระบบห้องปฏิบัติการเป็นตัวหาร; จำนวนแถวในชีทบันทึกการปฏิเสธเป็นเพียงยอดเคสที่ปฏิเสธ')
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
     rate = numerator / total * 100
     rate_color = '#16A34A' if rate <= 1 else ('#D97706' if rate <= 3 else '#DC2626')
     c1, c2, c3 = st.columns(3)
@@ -1510,9 +1527,6 @@ def render_rejection_rate(
     st.markdown(f"<div style='color:{rate_color};font-weight:700;margin-top:-0.35rem;'>สถานะ: {'ต่ำ' if rate <= 1 else ('เฝ้าระวัง' if rate <= 3 else 'สูง')} · ตัวหารมาจากแท็บยอดตรวจทั้งหมด</div>", unsafe_allow_html=True)
 
     # Show monthly rate trend when monthly totals are available.
-    month_den = selected_denominator.groupby(['year_month', 'thai_month_year'], as_index=False)['total_specimens'].sum()
-    month_num = df_cases.groupby(['year_month', 'thai_month_year'], as_index=False).size().rename(columns={'size': 'rejected'})
-    rate_table = month_den.merge(month_num, on=['year_month', 'thai_month_year'], how='left').fillna({'rejected': 0})
     rate_table['rate_pct'] = rate_table['rejected'] / rate_table['total_specimens'] * 100
     if not rate_table.empty:
         display_rate = rate_table[['thai_month_year', 'rejected', 'total_specimens', 'rate_pct']].rename(columns={

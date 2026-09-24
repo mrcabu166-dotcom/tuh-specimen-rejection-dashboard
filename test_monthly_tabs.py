@@ -5,7 +5,7 @@ import unittest
 
 from openpyxl import Workbook
 
-from cleaner import load_and_consolidate, parse_sheet_month
+from cleaner import get_kpis, load_and_consolidate, parse_sheet_month
 
 
 HEADERS = ['วันที่', 'เวลา', 'HN', 'Ward', 'สิ่งส่งตรวจ', 'ใบส่งตรวจ']
@@ -86,6 +86,24 @@ class MonthlyTabsTest(unittest.TestCase):
         self.assertEqual(denominator['year_month'].tolist(), ['2026-10', '2026-11', '2027-01'])
         self.assertEqual(denominator['total_specimens'].tolist(), [100.0, 200.0, 300.0])
         self.assertTrue(cases.attrs['denominator_sheet_found'])
+
+    def test_repeated_thai_vowel_joins_the_same_ward_in_kpi_and_detail(self):
+        book = Workbook()
+        sheet = book.active
+        sheet.title = 'ก.ย. 69'
+        sheet.append(HEADERS)
+        sheet.append([1, '09:00', 'HN-ปิดบัง', 'อายุรกรรมหญิงสามัญ', 'ติดชื่อผิดราย', None])
+        sheet.append([2, '09:00', 'HN-ปิดบัง', 'อายุุรกรรมหญิงสามัญ', 'ติดชื่อผิดราย', None])
+        source = io.BytesIO()
+        book.save(source)
+        source.seek(0)
+        source.name = 'wards.xlsx'
+
+        cases, causes = load_and_consolidate(source)
+        target = 'อายุรกรรมหญิงสามัญ'
+        self.assertEqual(cases['ward_standard'].unique().tolist(), [target])
+        self.assertEqual(get_kpis(cases, causes)['top_ward_cases'], 2)
+        self.assertEqual(len(cases[cases['ward_standard'] == target]), 2)
 
 
 if __name__ == '__main__':

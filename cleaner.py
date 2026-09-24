@@ -485,6 +485,11 @@ def standardize_ward(ward_raw: str) -> tuple[str, str]:
         return 'ไม่ระบุหอผู้ป่วย', 'ไม่ระบุกลุ่ม'
     
     cleaned = ward_raw.strip()
+
+    # Repeated Thai vowel/tone marks are typing errors that look almost
+    # identical on screen but otherwise create a separate Ward in charts.
+    # For example, "อายุุรกรรมหญิงสามัญ" must join "อายุรกรรมหญิงสามัญ".
+    cleaned = re.sub(r'([\u0e31\u0e34-\u0e3a\u0e47-\u0e4e])\1+', r'\1', cleaned)
     
     # Direct dictionary lookup
     if cleaned in WARD_MAPPING:
