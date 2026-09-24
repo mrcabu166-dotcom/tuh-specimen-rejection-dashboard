@@ -457,6 +457,8 @@ DEFAULT_EXCEL_PATHS = [
 ]
 GOOGLE_SHEET_ID = "1Ws94jJzPuSznmiMikW3kzuZLgHgyL0licHULhPHfV9I"
 GOOGLE_SHEET_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
+MICROBIOLOGY_SHEET_ID = "1lG65CqHX4MJkLZDx34M84YkqJZE2sOeT"
+MICROBIOLOGY_XLSX_URL = f"https://docs.google.com/spreadsheets/d/{MICROBIOLOGY_SHEET_ID}/export?format=xlsx"
 DEFAULT_MONTHLY_QUALITY_TARGET = 30
 
 @st.cache_data(show_spinner="กำลังซิงก์และประมวลผลข้อมูล...", ttl=900)
@@ -554,6 +556,25 @@ def load_data(file_source, cache_version="monthly-tabs-20260924"):
         'denominator_sheet_found': denominator_sheet_found,
     }
     return public_cases, public_causes
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def load_microbiology_source(cache_version="culture-stats-20260924"):
+    """Fetch the shared microbiology workbook and normalize its two views."""
+    local_fallback = os.path.join(os.path.dirname(__file__), "microbiology_stats_source.xlsx")
+    try:
+        response = requests.get(MICROBIOLOGY_XLSX_URL, timeout=45)
+        response.raise_for_status()
+        source = io.BytesIO(response.content)
+        source.name = "microbiology_stats.xlsx"
+        return cleaner.load_microbiology_stats(source)
+    except Exception as remote_error:
+        if os.path.exists(local_fallback):
+            result = cleaner.load_microbiology_stats(local_fallback)
+            result.setdefault('warnings', []).append(f'ใช้ไฟล์สำรองในเครื่อง: {remote_error}')
+            return result
+        return {'monthly': pd.DataFrame(), 'annual': pd.DataFrame(),
+                'warnings': [f'ซิงก์สถิติจุลชีววิทยาไม่สำเร็จ: {remote_error}']}
 
 
 # ==============================================================================
@@ -1512,6 +1533,93 @@ def render_rejection_rate(
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def render_microbiology_stats(stats: dict):
+    """Render monthly and fiscal-year microbiology workload statistics."""
+    st.markdown("<div class='chart-card'><div class='chart-title'>🧫 สถิติงานจุลชีววิทยาแยกรายเดือนและรายปี</div>", unsafe_allow_html=True)
+    monthly = stats.get('monthly', pd.DataFrame()) if stats else pd.DataFrame()
+    annual = stats.get('annual', pd.DataFrame()) if stats else pd.DataFrame()
+    if monthly.empty and annual.empty:
+        st.warning('ยังโหลดข้อมูลสถิติงานจุลชีววิทยาไม่ได้')
+        for warning in (stats or {}).get('warnings', []):
+            st.caption(warning)
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    fiscal_years = sorted(set(monthly.get('fiscal_year_num', pd.Series(dtype=int)).dropna().astype(int)) |
+                          set(annual.get('fiscal_year_num', pd.Series(dtype=int)).dropna().astype(int)))
+    specimen_types = [name for name in cleaner.MICROBIOLOGY_SPECIMEN_NAMES
+                      if name in set(monthly.get('specimen_type', pd.Series(dtype=str))) |
+                      set(annual.get('specimen_type', pd.Series(dtype=str)))]
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        selected_fy = st.selectbox('ปีงบประมาณ', fiscal_years, index=len(fiscal_years) - 1,
+                                   format_func=lambda value: f'ปีงบประมาณ {value}', key='microbiology_fy')
+    with c2:
+        selected_types = st.multiselect('ชนิดสิ่งส่งตรวจ', specimen_types, default=specimen_types,
+                                        key='microbiology_types')
+    if not selected_types:
+        selected_types = specimen_types
+
+    fy_monthly = monthly[(monthly['fiscal_year_num'] == selected_fy) &
+                         (monthly['specimen_type'].isin(selected_types))].copy()
+    fy_annual = annual[(annual['fiscal_year_num'] == selected_fy) &
+                       (annual['specimen_type'].isin(selected_types))].copy()
+    total = float(fy_annual['count'].sum()) if not fy_annual.empty else float(fy_monthly['count'].sum())
+    month_totals = fy_monthly.groupby(['month_num', 'month'], as_index=False)['count'].sum().sort_values('month_num')
+    peak = month_totals.loc[month_totals['count'].idxmax()] if not month_totals.empty else None
+    top_type = fy_annual.groupby('specimen_type')['count'].sum().sort_values(ascending=False).index[0] if not fy_annual.empty else '-'
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        st.metric('ยอดตรวจรวมในปีที่เลือก', f'{total:,.0f}')
+    with k2:
+        st.metric('เดือนที่มียอดสูงสุด', f"{peak['month']} ({peak['count']:,.0f})" if peak is not None else '-')
+    with k3:
+        st.metric('ชนิดสิ่งส่งตรวจสูงสุด', top_type)
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown('**แนวโน้มยอดตรวจรายเดือน**')
+        if month_totals.empty:
+            st.info('ปีงบประมาณนี้ยังไม่มีข้อมูลรายเดือน')
+        else:
+            fig = px.bar(month_totals, x='month', y='count', labels={'month': 'เดือน', 'count': 'จำนวนรายการ'})
+            fig.update_traces(marker_color='#6c5070')
+            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width='stretch')
+    with right:
+        st.markdown('**องค์ประกอบยอดตรวจแต่ละเดือน**')
+        if fy_monthly.empty:
+            st.info('ปีงบประมาณนี้ยังไม่มีข้อมูลรายเดือน')
+        else:
+            fig = px.bar(fy_monthly.sort_values('month_num'), x='month', y='count', color='specimen_type',
+                         labels={'month': 'เดือน', 'count': 'จำนวนรายการ', 'specimen_type': 'ชนิดสิ่งส่งตรวจ'},
+                         color_discrete_sequence=['#6c5070', '#df6a6a', '#c2dbc1', '#e7b85c', '#8ab6d6', '#9b7bb8'])
+            fig.update_layout(barmode='stack', height=340, margin=dict(l=10, r=10, t=10, b=10), legend_orientation='h')
+            st.plotly_chart(fig, width='stretch')
+
+    st.markdown('**เปรียบเทียบยอดรวมระหว่างปีงบประมาณ**')
+    annual_compare = annual[annual['specimen_type'].isin(selected_types)].copy()
+    annual_compare = annual_compare.groupby(['fiscal_year_num', 'fiscal_year', 'specimen_type'], as_index=False)['count'].sum()
+    if not annual_compare.empty:
+        fig = px.bar(annual_compare, x='fiscal_year_num', y='count', color='specimen_type', barmode='group',
+                     labels={'fiscal_year_num': 'ปีงบประมาณ', 'count': 'จำนวนรายการ', 'specimen_type': 'ชนิดสิ่งส่งตรวจ'},
+                     color_discrete_sequence=['#6c5070', '#df6a6a', '#c2dbc1', '#e7b85c', '#8ab6d6', '#9b7bb8'])
+        fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), legend_orientation='h')
+        st.plotly_chart(fig, width='stretch')
+
+    if not fy_monthly.empty:
+        pivot = fy_monthly.pivot_table(index=['month_num', 'month'], columns='specimen_type', values='count', aggfunc='sum', fill_value=0).reset_index()
+        pivot = pivot.sort_values('month_num').drop(columns=['month_num'])
+        present_types = [name for name in specimen_types if name in pivot.columns]
+        pivot['รวมทุกชนิด'] = pivot[present_types].sum(axis=1)
+        st.dataframe(pivot, width='stretch', hide_index=True)
+        st.download_button('📥 ดาวน์โหลดสถิติจุลชีววิทยา CSV', data=fy_monthly.to_csv(index=False, encoding='utf-8-sig'),
+                           file_name=f'microbiology_{selected_fy}.csv', mime='text/csv')
+    for warning in (stats or {}).get('warnings', []):
+        st.caption(warning)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 def render_data_quality_check(df_cases: pd.DataFrame, df_causes: pd.DataFrame):
     """Audit dates, duplicate records, Ward mappings, and cause grouping."""
     cases = df_cases.copy()
@@ -1594,6 +1702,7 @@ def refresh_google_data_while_open():
 def main():
     # 1. Render Sidebar & retrieve filters
     bundle = render_sidebar()
+    microbiology_stats = load_microbiology_source()
     
     # 2. Apply filters to dataframes
     df_cases, df_causes = apply_filters(bundle)
@@ -1608,12 +1717,13 @@ def main():
     render_kpi_cards(df_cases, df_causes, num_months=len(bundle['selected_months_th']))
     
     # 6. Tab Navigation
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 ภาพรวม & แนวโน้ม",
         "🔍 วิเคราะห์สาเหตุเชิงลึก",
         "🏥 เจาะลึกหอผู้ป่วย",
         "📋 ตารางข้อมูล & ส่งออก",
-        "🩺 Data Quality Check"
+        "🩺 Data Quality Check",
+        "🧫 งานจุลชีววิทยา"
     ])
     
     # --------------------------------------------------------------------------
@@ -1961,6 +2071,12 @@ def main():
                 ref_rows.append({'ชื่อเดิม / ตัวย่อ': raw_w, 'ชื่อมาตรฐาน': std_w, 'กลุ่มแผนกหลัก': grp})
             st.dataframe(pd.DataFrame(ref_rows), width="stretch", height=350, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------------------------
+    # TAB 6: สถิติงานจุลชีววิทยา
+    # --------------------------------------------------------------------------
+    with tab6:
+        render_microbiology_stats(microbiology_stats)
 
 
 if __name__ == "__main__":

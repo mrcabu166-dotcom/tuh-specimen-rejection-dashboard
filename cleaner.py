@@ -1232,6 +1232,165 @@ def get_rejection_rate_tables(
     return pd.DataFrame(month_rows, columns=columns), ward_table
 
 
+# ============================================================================
+# 4. MICROBIOLOGY WORKLOAD STATISTICS
+# ============================================================================
+
+MICROBIOLOGY_SPECIMEN_NAMES = (
+    'Hemo', 'Urine', 'Stool', 'Genital tract', 'Sputum', 'Pus', 'Fluid',
+    'Gram stain', 'AFB', 'Modified AFB', 'KOH', 'Fungus', 'TB', 'PCR'
+)
+
+
+def _microbiology_number(value):
+    """Convert spreadsheet counts to numbers while ignoring placeholders."""
+    if value is None or (isinstance(value, str) and value.strip() in {'', '-', ' -', '#VALUE!'}):
+        return None
+    number = pd.to_numeric(str(value).replace(',', '').strip(), errors='coerce')
+    return None if pd.isna(number) else float(number)
+
+
+def _microbiology_month(value):
+    text = str(value or '').strip().lower()
+    for name, month in THAI_MONTHS.items():
+        if text == name.lower():
+            return month
+    return None
+
+
+def _microbiology_fiscal_year(value):
+    match = re.search(r'ปีงบ\s*([0-9๐-๙]{4})', str(value or ''))
+    if not match:
+        return None
+    digits = str(match.group(1)).translate(str.maketrans('๐๑๒๓๔๕๖๗๘๙', '0123456789'))
+    return int(digits)
+
+
+def _microbiology_period(fiscal_year, month):
+    """Return Gregorian year-month for a Thai fiscal-year/month pair."""
+    year_ce = fiscal_year - 543 if month <= 9 else fiscal_year - 544
+    return f'{year_ce:04d}-{month:02d}'
+
+
+def load_microbiology_stats(source) -> dict:
+    """Read the annual and monthly microbiology workload workbook.
+
+    The workbook repeats a small monthly block for every fiscal year, so this
+    parser finds each ``ปีงบ`` marker and reads the headers immediately below it
+    instead of relying on fixed row numbers. This lets new fiscal-year blocks
+    be added without changing the dashboard code.
+    """
+    monthly_records = []
+    annual_records = []
+    warnings = []
+    try:
+        xl = pd.ExcelFile(source)
+    except Exception as exc:
+        return {'monthly': pd.DataFrame(), 'annual': pd.DataFrame(), 'warnings': [str(exc)]}
+
+    month_sheet = next((name for name in xl.sheet_names if 'แยก culture เดือน' in name.lower()), None)
+    year_sheet = next((name for name in xl.sheet_names if 'แยก culture ปี' in name.lower()), None)
+    if month_sheet is None:
+        warnings.append('ไม่พบชีทแยก Culture เดือน')
+    if year_sheet is None:
+        warnings.append('ไม่พบชีทแยก Culture ปี')
+
+    if month_sheet:
+        raw = xl.parse(month_sheet, header=None)
+        fy_rows = [(idx, _microbiology_fiscal_year(row.iloc[0])) for idx, row in raw.iterrows()]
+        fy_rows = [(idx, fy) for idx, fy in fy_rows if fy is not None]
+        for block_index, (fy_row, fiscal_year) in enumerate(fy_rows):
+            next_fy_row = fy_rows[block_index + 1][0] if block_index + 1 < len(fy_rows) else len(raw)
+            header_row = None
+            specimen_columns = {}
+            for candidate in range(fy_row + 1, min(fy_row + 6, next_fy_row)):
+                values = raw.iloc[candidate].tolist()
+                found = {}
+                # The first monthly table occupies A:O. Some versions repeat
+                # aggregate views to the right; ignore those duplicate columns.
+                for col, value in enumerate(values[:15]):
+                    label = str(value or '').strip()
+                    canonical = next((name for name in MICROBIOLOGY_SPECIMEN_NAMES if label.lower() == name.lower()), None)
+                    if canonical:
+                        found[col] = canonical
+                if len(found) >= 3:
+                    header_row, specimen_columns = candidate, found
+                    break
+            if header_row is None:
+                warnings.append(f'ปีงบประมาณ {fiscal_year}: ไม่พบหัวคอลัมน์ชนิดสิ่งส่งตรวจ')
+                continue
+            for row_index in range(header_row + 1, next_fy_row):
+                month = _microbiology_month(raw.iat[row_index, 0] if raw.shape[1] else None)
+                if month is None:
+                    continue
+                for col, specimen in specimen_columns.items():
+                    count = _microbiology_number(raw.iat[row_index, col])
+                    if count is None:
+                        continue
+                    monthly_records.append({
+                        'fiscal_year_num': fiscal_year,
+                        'fiscal_year': f'ปีงบประมาณ {fiscal_year}',
+                        'month_num': month,
+                        'month': str(raw.iat[row_index, 0]).strip(),
+                        'year_month': _microbiology_period(fiscal_year, month),
+                        'specimen_type': specimen,
+                        'count': count,
+                        'source_sheet': month_sheet,
+                    })
+
+    if year_sheet:
+        raw = xl.parse(year_sheet, header=None)
+        for header_row in range(len(raw)):
+            years = []
+            for col in range(1, min(raw.shape[1], 20)):
+                number = _microbiology_number(raw.iat[header_row, col])
+                if number is not None and 2400 <= number <= 2700:
+                    years.append((col, int(number)))
+            if len(years) < 2:
+                continue
+            for row_index in range(header_row + 1, min(header_row + 20, len(raw))):
+                label = str(raw.iat[row_index, 0] or '').strip()
+                specimen = next((name for name in MICROBIOLOGY_SPECIMEN_NAMES if label.lower() == name.lower()), None)
+                if specimen is None:
+                    if row_index > header_row + 1 and not label:
+                        break
+                    continue
+                for col, fiscal_year in years:
+                    count = _microbiology_number(raw.iat[row_index, col])
+                    if count is None:
+                        continue
+                    annual_records.append({
+                        'fiscal_year_num': fiscal_year,
+                        'fiscal_year': f'ปีงบประมาณ {fiscal_year}',
+                        'specimen_type': specimen,
+                        'count': count,
+                        'source_sheet': year_sheet,
+                    })
+
+    monthly = pd.DataFrame(monthly_records)
+    annual = pd.DataFrame(annual_records)
+    if monthly.empty:
+        monthly = pd.DataFrame(columns=['fiscal_year_num', 'fiscal_year', 'month_num', 'month', 'year_month', 'specimen_type', 'count', 'source_sheet'])
+    if annual.empty:
+        annual = pd.DataFrame(columns=['fiscal_year_num', 'fiscal_year', 'specimen_type', 'count', 'source_sheet'])
+
+    # The annual sheet may lag behind the current fiscal year. Fill only missing
+    # annual keys from monthly totals; existing official annual totals win.
+    if not monthly.empty:
+        monthly_totals = (monthly.groupby(['fiscal_year_num', 'fiscal_year', 'specimen_type'], as_index=False)['count'].sum())
+        if not annual.empty:
+            existing = set(zip(annual['fiscal_year_num'], annual['specimen_type']))
+            monthly_totals = monthly_totals[
+                ~monthly_totals.apply(lambda row: (row['fiscal_year_num'], row['specimen_type']) in existing, axis=1)
+            ]
+        if not monthly_totals.empty:
+            monthly_totals['source_sheet'] = 'คำนวณจากแยก Culture เดือน'
+            annual = pd.concat([annual, monthly_totals], ignore_index=True)
+
+    return {'monthly': monthly, 'annual': annual, 'warnings': warnings,
+            'month_sheet': month_sheet, 'year_sheet': year_sheet}
+
+
 def get_monthly_trend(df_cases: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate rejection cases over time by Year-Month.

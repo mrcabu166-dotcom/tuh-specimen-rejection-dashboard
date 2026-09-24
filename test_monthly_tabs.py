@@ -6,7 +6,7 @@ import unittest
 import pandas as pd
 from openpyxl import Workbook
 
-from cleaner import get_kpis, get_rejection_rate_tables, load_and_consolidate, parse_sheet_month
+from cleaner import get_kpis, get_rejection_rate_tables, load_and_consolidate, load_microbiology_stats, parse_sheet_month
 
 
 HEADERS = ['วันที่', 'เวลา', 'HN', 'Ward', 'สิ่งส่งตรวจ', 'ใบส่งตรวจ']
@@ -103,6 +103,33 @@ class MonthlyTabsTest(unittest.TestCase):
         cases, _ = load_and_consolidate(source)
         self.assertTrue(cases.attrs['denominator'].empty)
         self.assertTrue(any('แหล่งข้อมูล' in warning for warning in cases.attrs['ingestion_warnings']))
+
+    def test_microbiology_parser_reads_repeated_fiscal_year_blocks(self):
+        book = Workbook()
+        monthly = book.active
+        monthly.title = 'แยก Culture เดือน '
+        monthly.append(['สถิติ'])
+        monthly.append(['ปีงบ 2569'])
+        monthly.append(['เดือน', 'รายการสิ่งส่งตรวจ'])
+        monthly.append([None, 'Hemo', 'Urine', 'Fungus'])
+        monthly.append(['ตุลาคม', 10, 20, 3])
+        monthly.append(['พฤศจิกายน', 11, 21, 4])
+        monthly.append(['Total.', 21, 41, 7])
+        annual = book.create_sheet('แยก Culture ปี')
+        annual.append(['รายการสิ่งส่งตรวจ', 'ปีงบประมาณ'])
+        annual.append([None, 2568, 2569])
+        annual.append(['Hemo', 100, None])
+        annual.append(['Urine', 200, None])
+        annual.append(['Fungus', 30, None])
+        result = io.BytesIO()
+        book.save(result)
+        result.seek(0)
+        stats = load_microbiology_stats(result)
+        self.assertEqual(len(stats['monthly']), 6)
+        self.assertEqual(stats['monthly']['count'].sum(), 69)
+        fy2569 = stats['annual'][stats['annual']['fiscal_year_num'] == 2569]
+        self.assertEqual(fy2569['count'].sum(), 69)
+        self.assertEqual(stats['annual'][stats['annual']['fiscal_year_num'] == 2568]['count'].sum(), 330)
 
     def test_repeated_thai_vowel_joins_the_same_ward_in_kpi_and_detail(self):
         book = Workbook()

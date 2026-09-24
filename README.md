@@ -35,3 +35,12 @@ The dashboard calculates monthly and month-by-Ward rejection rates after the
 next sync. Months or Wards without a valid total are marked as unavailable.
 Rate numerators are affected by fiscal-year, month, and Ward filters, but not
 by cause or resolution filters.
+
+## Microbiology workload statistics
+
+The dashboard also syncs the shared workbook `รวมสถิติการส่งตรวจทางจุลชีววิทยา
+(ปีงบ) -NEW.xlsx` and adds a `🧫 งานจุลชีววิทยา` tab. It reads the repeated
+`แยก Culture เดือน` blocks and the `แยก Culture ปี` table, so a new fiscal-year
+block can be added without changing the parser. The tab provides fiscal-year
+selection, specimen-type filters, monthly totals, year-to-year comparison, a
+monthly breakdown table, and CSV export.
